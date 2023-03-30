@@ -842,13 +842,23 @@ void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRende
 // Position (v2f), Vertex color (v3f)
 f32 defaultTriangleVertices[] =
 {
-    -0.5f, -0.5f, 1, 0, 0,
-     0.5f, -0.5f, 0, 1, 0,
-     0.5f,  0.5f, 0, 0, 1,
+    //-0.5f, -0.5f, 1, 0, 0,
+     //0.5f, -0.5f, 0, 1, 0,
+     //0.5f,  0.5f, 0, 0, 1,
+
+    //-0.5f, -0.5f, 1, 0, 0,
+     //0.5f,  0.5f, 0, 1, 0,
+    //-0.5f,  0.5f, 0, 0, 1,
 
     -0.5f, -0.5f, 1, 0, 0,
-     0.5f,  0.5f, 0, 1, 0,
+     0.5f, -0.5f, 0, 1, 0,
+     0.5f,  0.5f, 1, 1, 1,
     -0.5f,  0.5f, 0, 0, 1,
+};
+
+u32 defaultTriangleIndices[] =
+{
+    0, 1, 2, 0, 2, 3,
 };
 
 enum BufferType
@@ -1263,6 +1273,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     // Resource creation
     Buffer defaultTriangleVertexBuffer = CreateBuffer(&ctx, BUFFER_TYPE_VERTEX,
             sizeof(defaultTriangleVertices), sizeof(defaultTriangleVertices) / (5 * sizeof(f32)), (u8*)defaultTriangleVertices);
+    Buffer defaultTriangleIndexBuffer = CreateBuffer(&ctx, BUFFER_TYPE_INDEX,
+            sizeof(defaultTriangleIndices), sizeof(defaultTriangleIndices) / sizeof(u32), (u8*)defaultTriangleIndices);
 
     // Render pipeline setup
     u32 presentRenderPassColorOutputCount = 1;
@@ -1387,8 +1399,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
 
         VkDeviceSize bufferOffset = 0;
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, &defaultTriangleVertexBuffer.apiObject, &bufferOffset);
+        vkCmdBindIndexBuffer(commandBuffer, defaultTriangleIndexBuffer.apiObject, 0, VK_INDEX_TYPE_UINT32);
 
-        vkCmdDraw(commandBuffer, defaultTriangleVertexBuffer.count, 1, 0, 0);
+        //vkCmdDraw(commandBuffer, defaultTriangleVertexBuffer.count, 1, 0, 0);
+        vkCmdDrawIndexed(commandBuffer, defaultTriangleIndexBuffer.count, 1, 0, 0, 0);
 
         // End render pass
         vkCmdEndRenderPass(commandBuffer);
@@ -1440,6 +1454,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
 
     vkDeviceWaitIdle(ctx.apiDevice);
     DestroyBuffer(&ctx, defaultTriangleVertexBuffer);
+    DestroyBuffer(&ctx, defaultTriangleIndexBuffer);
     DestroyGraphicsPipeline(&ctx, &defaultPassPipeline);
     DestroyRenderPass(&ctx, &presentRenderPass);
     DestroySwapChain(&ctx, &swapChain);
