@@ -184,7 +184,7 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = engineName;
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_0;
+    appInfo.apiVersion = VK_API_VERSION_1_1;
 
     // Creating vulkan instance with required extensions
     VkInstanceCreateInfo instanceInfo = {};
@@ -842,13 +842,13 @@ void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRende
 // Position (v2f), Vertex color (v3f)
 f32 defaultTriangleVertices[] =
 {
-    -0.5f,   0.5f,   1, 0, 0,
-    0.5f,   -0.5f,   0, 1, 0,
-    -0.5f,    -0.5f,   0, 0, 1,
+    -0.5f, -0.5f, 1, 0, 0,
+     0.5f, -0.5f, 0, 1, 0,
+     0.5f,  0.5f, 0, 0, 1,
 
-    -0.5f,      0.5f,   1, 0, 0,
-    0.5f,   0.5f,   0, 1, 0,
-    0.5f,  -0.5f,   0, 0, 1,
+    -0.5f, -0.5f, 1, 0, 0,
+     0.5f,  0.5f, 0, 1, 0,
+    -0.5f,  0.5f, 0, 0, 1,
 };
 
 enum BufferType
@@ -1125,14 +1125,6 @@ GraphicsPipeline CreateGraphicsPipeline(
     inputAssemblyInfo.topology = primitiveTypeToVk[inputAssemblyState.primitive];
     inputAssemblyInfo.primitiveRestartEnable = VK_FALSE;
 
-//    // Vertex input (currently empty, no vertex buffers yet)
-//    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
-//    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-//    vertexInputInfo.vertexBindingDescriptionCount = 0;
-//    vertexInputInfo.pVertexBindingDescriptions = NULL;
-//    vertexInputInfo.vertexAttributeDescriptionCount = 0;
-//    vertexInputInfo.pVertexAttributeDescriptions = NULL;
-
     // Vertex inputs
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1141,23 +1133,21 @@ GraphicsPipeline CreateGraphicsPipeline(
     vertexInputInfo.vertexAttributeDescriptionCount = vertexLayout.attributeCount;
     vertexInputInfo.pVertexAttributeDescriptions = vertexLayout.apiAttributeDescriptions;
 
-    // Viewport state (currently only default viewports/scissor rect, created from RT)
-    VkViewport viewport;
-    viewport.x = 0; viewport.y = 0;
-    viewport.width = renderPass->outputWidth;
-    viewport.height = renderPass->outputHeight;
-    viewport.minDepth = 0; viewport.maxDepth = 1;
+    VkDynamicState dynamicStates[] =
+    {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR,
+    };
+    VkPipelineDynamicStateCreateInfo dynamicStateInfo = {};
+    dynamicStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicStateInfo.dynamicStateCount = ARR_LEN(dynamicStates);
+    dynamicStateInfo.pDynamicStates = dynamicStates;
 
-    VkRect2D scissorRect;
-    scissorRect.offset = {0,0};
-    scissorRect.extent = {renderPass->outputWidth, renderPass->outputHeight};
-
+    // Viewport state (only one of each per pipeline, but can be changed on draw time)
     VkPipelineViewportStateCreateInfo viewportStateInfo = {};
     viewportStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
     viewportStateInfo.viewportCount = 1;
-    viewportStateInfo.pViewports = &viewport;
     viewportStateInfo.scissorCount = 1;
-    viewportStateInfo.pScissors = &scissorRect;
 
     // Rasterization
     VkPipelineRasterizationStateCreateInfo rasterizationStateInfo = {};
@@ -1202,9 +1192,9 @@ GraphicsPipeline CreateGraphicsPipeline(
     apiObjectInfo.pVertexInputState = &vertexInputInfo;
     apiObjectInfo.pInputAssemblyState = &inputAssemblyInfo;
     apiObjectInfo.pViewportState = &viewportStateInfo;
+    apiObjectInfo.pDynamicState = &dynamicStateInfo;
     apiObjectInfo.pRasterizationState = &rasterizationStateInfo;
     apiObjectInfo.pColorBlendState = &colorBlendInfo;
-    apiObjectInfo.pDynamicState = NULL;
     apiObjectInfo.pDepthStencilState = NULL;
     apiObjectInfo.layout = pipelineLayout;
     apiObjectInfo.renderPass = renderPass->apiObject;
@@ -1379,6 +1369,22 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
 
         // Draw commands
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, defaultPassPipeline.apiObject);
+
+        VkViewport viewport = {};
+        // Note: viewport y and height are flipped, to match OpenGL bottom-left instead of
+        // Vulkan's default top-left coordinate system.
+        viewport.x = 0.f;
+        viewport.y = (f32)presentRenderPass.outputHeight;
+        viewport.width = presentRenderPass.outputWidth;
+        viewport.height = -(f32)presentRenderPass.outputHeight;
+        viewport.minDepth = 0.f;
+        viewport.maxDepth = 1.f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        VkRect2D scissorRect;
+        scissorRect.offset = {0,0};
+        scissorRect.extent = {presentRenderPass.outputWidth, presentRenderPass.outputHeight};
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissorRect);
+
         VkDeviceSize bufferOffset = 0;
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, &defaultTriangleVertexBuffer.apiObject, &bufferOffset);
 
