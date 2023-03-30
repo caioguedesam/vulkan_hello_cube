@@ -1,0 +1,6 @@
+-std=c++17
+-I../src/
+-I../third_party/vulkan/Include/
+-DWIN32_LEAN_AND_MEAN
+-DNOMINMAX
+-D_CRT_SECURE_NO_WARNINGS
