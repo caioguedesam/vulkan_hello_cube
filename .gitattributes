@@ -1,1 +1,3 @@
+*.vert linguist-language=GLSL
+*.frag linguist-language=GLSL
 third_party/* linguist-vendored
