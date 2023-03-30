@@ -6,6 +6,8 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_win32.h>
+#define VMA_IMPLEMENTATION
+#include <vma/vk_mem_alloc.h>
 
 #include <math.hpp>
 
@@ -148,17 +150,8 @@ VK_DECLARE_PROC(DestroyDebugUtilsMessengerEXT);
 #endif
 VK_DECLARE_PROC(GetPhysicalDeviceSurfaceSupportKHR);
 
-// TODO LIST
-//      CreateRenderContext**
-//      CreateSwapChain**
-//      CreateRenderPass**
-//      CreateGraphicsPipeline**
-//
-//      CreateCommandBuffer**
-//
-//      Render/Present code
-//
-//      ResizeSwapChain**
+#define RENDERER_MAX_FRAMES_IN_FLIGHT 2     // Double buffering
+
 struct RenderContext
 {
     VkInstance apiInstance = VK_NULL_HANDLE;
@@ -171,12 +164,14 @@ struct RenderContext
     VkDebugUtilsMessengerEXT apiDebugMessenger;
 #endif
 
-    VkCommandPool apiCommandPool = VK_NULL_HANDLE;
-    VkCommandBuffer apiCommandBuffer = VK_NULL_HANDLE;  // TODO(caio): Add one buffer per simultaneous frame
+    VmaAllocator apiMemoryAllocator = VK_NULL_HANDLE;
 
-    VkSemaphore apiSemaphoreRender = VK_NULL_HANDLE;
-    VkSemaphore apiSemaphorePresent = VK_NULL_HANDLE;
-    VkFence apiFenceRender = VK_NULL_HANDLE;
+    VkCommandPool apiCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer apiCommandBuffers[RENDERER_MAX_FRAMES_IN_FLIGHT];
+
+    VkSemaphore apiRenderSemaphores[RENDERER_MAX_FRAMES_IN_FLIGHT];
+    VkSemaphore apiPresentSemaphores[RENDERER_MAX_FRAMES_IN_FLIGHT];
+    VkFence apiRenderFences[RENDERER_MAX_FRAMES_IN_FLIGHT];
 };
 
 RenderContext CreateRenderContext(const char* appName, const char* engineName, HWND osWindow, HINSTANCE osInstance)
@@ -360,6 +355,14 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
     VkQueue commandQueue;
     vkGetDeviceQueue(device, commandQueueFamily, 0, &commandQueue);
 
+    // Creating buffer allocator
+    VmaAllocatorCreateInfo bufferAllocatorInfo = {};
+    bufferAllocatorInfo.instance = instance;
+    bufferAllocatorInfo.physicalDevice = physicalDevice;
+    bufferAllocatorInfo.device = device;
+    VmaAllocator memoryAllocator;
+    ret = vmaCreateAllocator(&bufferAllocatorInfo, &memoryAllocator);
+
     // Creating command buffers
     VkCommandPoolCreateInfo commandPoolInfo = {};
     commandPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -370,34 +373,41 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
     ret = vkCreateCommandPool(device, &commandPoolInfo, NULL, &commandPool);
     VK_ASSERT(ret);
 
-    VkCommandBufferAllocateInfo commandBufferAllocInfo = {};
-    commandBufferAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    commandBufferAllocInfo.commandBufferCount = 1;
-    commandBufferAllocInfo.commandPool = commandPool;
-    commandBufferAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    commandBufferAllocInfo.pNext = NULL;
-    VkCommandBuffer commandBuffer;
-    ret = vkAllocateCommandBuffers(device, &commandBufferAllocInfo, &commandBuffer);
-    VK_ASSERT(ret);
+    VkCommandBuffer commandBuffers[RENDERER_MAX_FRAMES_IN_FLIGHT];
+    for(i32 i = 0; i < RENDERER_MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        VkCommandBufferAllocateInfo commandBufferAllocInfo = {};
+        commandBufferAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        commandBufferAllocInfo.commandBufferCount = 1;
+        commandBufferAllocInfo.commandPool = commandPool;
+        commandBufferAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        commandBufferAllocInfo.pNext = NULL;
+        ret = vkAllocateCommandBuffers(device, &commandBufferAllocInfo, &commandBuffers[i]);
+        VK_ASSERT(ret);
+    }
 
     // Creating default render/present sync structures
-    VkSemaphore semaphoreRender, semaphorePresent;
-    VkFence fenceRender;
+    VkSemaphore renderSemaphores[RENDERER_MAX_FRAMES_IN_FLIGHT];
+    VkSemaphore presentSemaphores[RENDERER_MAX_FRAMES_IN_FLIGHT];
+    VkFence     renderFences[RENDERER_MAX_FRAMES_IN_FLIGHT];
 
-    VkSemaphoreCreateInfo semaphoreInfo = {};
-    semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    semaphoreInfo.pNext = NULL;
-    ret = vkCreateSemaphore(device, &semaphoreInfo, NULL, &semaphoreRender);
-    VK_ASSERT(ret);
-    ret = vkCreateSemaphore(device, &semaphoreInfo, NULL, &semaphorePresent);
-    VK_ASSERT(ret);
+    for(i32 i = 0; i < RENDERER_MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        VkSemaphoreCreateInfo semaphoreInfo = {};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        semaphoreInfo.pNext = NULL;
+        ret = vkCreateSemaphore(device, &semaphoreInfo, NULL, &renderSemaphores[i]);
+        VK_ASSERT(ret);
+        ret = vkCreateSemaphore(device, &semaphoreInfo, NULL, &presentSemaphores[i]);
+        VK_ASSERT(ret);
 
-    VkFenceCreateInfo fenceInfo = {};
-    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fenceInfo.pNext = NULL;
-    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    ret = vkCreateFence(device, &fenceInfo, NULL, &fenceRender);
-    VK_ASSERT(ret);
+        VkFenceCreateInfo fenceInfo = {};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.pNext = NULL;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        ret = vkCreateFence(device, &fenceInfo, NULL, &renderFences[i]);
+        VK_ASSERT(ret);
+    }
 
     RenderContext result = {};
     result.apiInstance = instance;
@@ -409,20 +419,29 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
 #if _DEBUG
     result.apiDebugMessenger = debugMessenger;
 #endif
+    result.apiMemoryAllocator = memoryAllocator;
     result.apiCommandPool = commandPool;
-    result.apiCommandBuffer = commandBuffer;
-    result.apiSemaphoreRender = semaphoreRender;
-    result.apiSemaphorePresent = semaphorePresent;
-    result.apiFenceRender = fenceRender;
+    for(i32 i = 0; i < RENDERER_MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        result.apiCommandBuffers[i] = commandBuffers[i];
+        result.apiRenderSemaphores[i] = renderSemaphores[i];
+        result.apiPresentSemaphores[i] = presentSemaphores[i];
+        result.apiRenderFences[i] = renderFences[i];
+    }
+
     return result;
 }
 
 void DestroyRenderContext(RenderContext* ctx)
 {
     ASSERT(ctx);
-    vkDestroySemaphore(ctx->apiDevice, ctx->apiSemaphoreRender, NULL);
-    vkDestroySemaphore(ctx->apiDevice, ctx->apiSemaphorePresent, NULL);
-    vkDestroyFence(ctx->apiDevice, ctx->apiFenceRender, NULL);
+    for(i32 i = 0; i < RENDERER_MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        vkDestroySemaphore(ctx->apiDevice, ctx->apiRenderSemaphores[i], NULL);
+        vkDestroySemaphore(ctx->apiDevice, ctx->apiPresentSemaphores[i], NULL);
+        vkDestroyFence(ctx->apiDevice, ctx->apiRenderFences[i], NULL);
+    }
+    vmaDestroyAllocator(ctx->apiMemoryAllocator);
     vkDestroyCommandPool(ctx->apiDevice, ctx->apiCommandPool, NULL);
     vkDestroyDevice(ctx->apiDevice, NULL);
 #if _DEBUG
@@ -774,12 +793,6 @@ void DestroyRenderPass(RenderContext* ctx, RenderPass* renderPass)
     *renderPass = {};
 }
 
-// On Resize:
-//      Destroy swap chain
-//      Create new swap chain
-//      Destroy present render pass
-//      Create new present render pass based on new swap chain
-
 void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRenderPass)
 {
     vkDeviceWaitIdle(ctx->apiDevice);
@@ -824,7 +837,142 @@ void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRende
 };
 
 // ===================================================================
+// Graphics resources
+
+// Position (v2f), Vertex color (v3f)
+f32 defaultTriangleVertices[] =
+{
+    -0.5f,   0.5f,   1, 0, 0,
+    0.5f,   -0.5f,   0, 1, 0,
+    -0.5f,    -0.5f,   0, 0, 1,
+
+    -0.5f,      0.5f,   1, 0, 0,
+    0.5f,   0.5f,   0, 1, 0,
+    0.5f,  -0.5f,   0, 0, 1,
+};
+
+enum BufferType
+{
+    BUFFER_TYPE_VERTEX,
+    BUFFER_TYPE_INDEX,
+};
+VkBufferUsageFlags bufferTypeToVk[] =
+{
+    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+};
+
+struct Buffer
+{
+    VkBuffer apiObject;
+    VmaAllocation apiAllocation;
+    BufferType type;
+    u32 size = 0;
+    u32 stride = 0;
+    u32 count = 0;
+};
+
+Buffer CreateBuffer(RenderContext* ctx, BufferType type, u32 size, u32 count, u8* data)
+{
+    ASSERT(count);
+    ASSERT(size >= count);
+    // Create buffer
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = bufferTypeToVk[type];
+
+    VmaAllocationCreateInfo allocationInfo = {};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+    VkBuffer buffer;
+    VmaAllocation allocation;
+    VkResult ret = vmaCreateBuffer(ctx->apiMemoryAllocator, &bufferInfo, &allocationInfo, &buffer, &allocation, NULL);
+    VK_ASSERT(ret);
+
+    // Copy buffer data (later move to staging buffer)
+    void* bufferDataMapping = NULL;
+    vmaMapMemory(ctx->apiMemoryAllocator, allocation, &bufferDataMapping);
+    memcpy(bufferDataMapping, data, size);
+    vmaUnmapMemory(ctx->apiMemoryAllocator, allocation);
+
+    Buffer result = {};
+    result.type = type;
+    result.apiObject = buffer;
+    result.apiAllocation = allocation;
+    result.size = size;
+    result.count = count;
+    result.stride = size / count;
+    return result;
+}
+
+void DestroyBuffer(RenderContext* ctx, Buffer buffer)
+{
+    ASSERT(ctx);
+    ASSERT(ctx->apiMemoryAllocator != VK_NULL_HANDLE);
+    vmaDestroyBuffer(ctx->apiMemoryAllocator, buffer.apiObject, buffer.apiAllocation);
+}
+
+// ===================================================================
 // Graphics pipeline
+enum VertexFormat
+{
+    VERTEX_FORMAT_R32G32_FLOAT,
+    VERTEX_FORMAT_R32G32B32_FLOAT,
+};
+VkFormat vertexFormatToVk[] =
+{
+    VK_FORMAT_R32G32_SFLOAT,
+    VK_FORMAT_R32G32B32_SFLOAT,
+};
+u32 vertexFormatSizeInBytes[] =
+{
+    8,
+    12,
+};
+
+#define VERTEX_LAYOUT_MAX_ATTRIBUTES 8
+struct VertexLayout
+{
+    u32 index = -1;
+    VkVertexInputBindingDescription apiBindingDescription;
+
+    u32 attributeCount = 0;
+    VertexFormat attributeFormats[VERTEX_LAYOUT_MAX_ATTRIBUTES];
+    VkVertexInputAttributeDescription apiAttributeDescriptions[VERTEX_LAYOUT_MAX_ATTRIBUTES];
+};
+
+VertexLayout CreateVertexLayout(u32 layoutIndex, u32 attributeCount, VertexFormat* attributeFormats)
+{
+    VkVertexInputAttributeDescription attributeDescriptions[attributeCount];
+    u32 stride = 0;
+    for(i32 i = 0; i < attributeCount; i++)
+    {
+        attributeDescriptions[i].binding = layoutIndex;
+        attributeDescriptions[i].location = i;  // Vertex attribute locations are set in order.
+        attributeDescriptions[i].format = vertexFormatToVk[attributeFormats[i]];
+        attributeDescriptions[i].offset = stride;
+        stride += vertexFormatSizeInBytes[attributeFormats[i]];
+    }
+
+    VkVertexInputBindingDescription bindingDescription = {};
+    bindingDescription.binding = layoutIndex;
+    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;     // No instancing supported yet.
+    bindingDescription.stride = stride;
+
+    VertexLayout result = {};
+    result.index = layoutIndex;
+    result.apiBindingDescription = bindingDescription;
+    result.attributeCount = attributeCount;
+    for(i32 i = 0; i < attributeCount; i++)
+    {
+        result.attributeFormats[i] = attributeFormats[i];
+        result.apiAttributeDescriptions[i] = attributeDescriptions[i];
+    }
+    return result;
+}
+
 enum ShaderType
 {
     SHADER_TYPE_VERTEX,
@@ -921,8 +1069,8 @@ struct GraphicsPipeline
     ShaderAsset shaderPixel;
 
     // Fixed pipeline
-    // TODO(caio): Add vertex input stage handling here
     InputAssemblyState inputAssemblyState;
+    VertexLayout vertexLayout;  // Only one vertex layout per pipeline.
     // TODO(caio): Add support for dynamic viewport and scissor rect
     RasterizerState rasterizerState;
     // TODO(caio): Add support for color blend modes, depth testing modes...
@@ -933,6 +1081,7 @@ GraphicsPipeline CreateGraphicsPipeline(
         RenderPass* renderPass,
         InputAssemblyState inputAssemblyState,
         ShaderAsset vs, ShaderAsset ps, 
+        VertexLayout vertexLayout,
         RasterizerState rasterizerState)
 {
     ASSERT(ctx->apiDevice != VK_NULL_HANDLE);
@@ -976,13 +1125,21 @@ GraphicsPipeline CreateGraphicsPipeline(
     inputAssemblyInfo.topology = primitiveTypeToVk[inputAssemblyState.primitive];
     inputAssemblyInfo.primitiveRestartEnable = VK_FALSE;
 
-    // Vertex input (currently empty, no vertex buffers yet)
+//    // Vertex input (currently empty, no vertex buffers yet)
+//    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
+//    vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+//    vertexInputInfo.vertexBindingDescriptionCount = 0;
+//    vertexInputInfo.pVertexBindingDescriptions = NULL;
+//    vertexInputInfo.vertexAttributeDescriptionCount = 0;
+//    vertexInputInfo.pVertexAttributeDescriptions = NULL;
+
+    // Vertex inputs
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vertexInputInfo.vertexBindingDescriptionCount = 0;
-    vertexInputInfo.pVertexBindingDescriptions = NULL;
-    vertexInputInfo.vertexAttributeDescriptionCount = 0;
-    vertexInputInfo.pVertexAttributeDescriptions = NULL;
+    vertexInputInfo.vertexBindingDescriptionCount = 1;
+    vertexInputInfo.pVertexBindingDescriptions = &vertexLayout.apiBindingDescription;
+    vertexInputInfo.vertexAttributeDescriptionCount = vertexLayout.attributeCount;
+    vertexInputInfo.pVertexAttributeDescriptions = vertexLayout.apiAttributeDescriptions;
 
     // Viewport state (currently only default viewports/scissor rect, created from RT)
     VkViewport viewport;
@@ -1065,7 +1222,8 @@ GraphicsPipeline CreateGraphicsPipeline(
 
     GraphicsPipeline result =
     {
-        apiObject, pipelineLayout, vs, ps, inputAssemblyState, rasterizerState,
+        apiObject, pipelineLayout, vs, ps, 
+        inputAssemblyState, vertexLayout, rasterizerState,
     };
     return result;
 }
@@ -1112,6 +1270,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     RenderContext ctx = CreateRenderContext("Vulkan Hello Cube", "TypheusRendererVk", windowHandle, hInstance);
     SwapChain swapChain = CreateSwapChain(&ctx);
 
+    // Resource creation
+    Buffer defaultTriangleVertexBuffer = CreateBuffer(&ctx, BUFFER_TYPE_VERTEX,
+            sizeof(defaultTriangleVertices), sizeof(defaultTriangleVertices) / (5 * sizeof(f32)), (u8*)defaultTriangleVertices);
+
+    // Render pipeline setup
     u32 presentRenderPassColorOutputCount = 1;
     RenderPassColorOutputInfo presentRenderPassColorOutputInfo[] =
     {
@@ -1141,28 +1304,39 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     ShaderAsset shader_TrianglePS = CreateShaderAsset(SHADER_PATH"first_triangle_ps.spv", SHADER_TYPE_PIXEL);
     InputAssemblyState defaultPassInputAssemblyState = {};
     defaultPassInputAssemblyState.primitive = PRIMITIVE_TRIANGLE_LIST;
+
+    VertexFormat defaultPassVertexAttributeFormats[] = { VERTEX_FORMAT_R32G32_FLOAT, VERTEX_FORMAT_R32G32B32_FLOAT };
+    VertexLayout defaultPassVertexLayout = CreateVertexLayout(0, 2, defaultPassVertexAttributeFormats);
+
     RasterizerState defaultPassRasterizerState = {};
     defaultPassRasterizerState.fillMode = FILL_MODE_SOLID;
     defaultPassRasterizerState.cullMode = CULL_MODE_BACK;
     defaultPassRasterizerState.frontFace = FRONT_FACE_CCW;
     GraphicsPipeline defaultPassPipeline = CreateGraphicsPipeline(&ctx, &presentRenderPass,
-            defaultPassInputAssemblyState, shader_TriangleVS, shader_TrianglePS, defaultPassRasterizerState);
+            defaultPassInputAssemblyState, shader_TriangleVS, shader_TrianglePS, defaultPassVertexLayout, defaultPassRasterizerState);
 
 
     // ======================================================================
     // Render loop (still not abstracted)
     
-    uint32_t currentFrame = 0;
+    u32 currentFrame = 0;
+    u32 inFlightFrame = 0;
     while(!closeApp)
     {
         ProcessWindowMessages();
 
+        // Indexing correct resources based on in-flight frame
+        VkSemaphore renderSemaphore = ctx.apiRenderSemaphores[inFlightFrame];
+        VkSemaphore presentSemaphore = ctx.apiPresentSemaphores[inFlightFrame];
+        VkFence renderFence = ctx.apiRenderFences[inFlightFrame];
+        VkCommandBuffer commandBuffer = ctx.apiCommandBuffers[inFlightFrame];
+
         //  Wait for previous frame to finish
-        vkWaitForFences(ctx.apiDevice, 1, &ctx.apiFenceRender, VK_TRUE, UINT64_MAX);
+        vkWaitForFences(ctx.apiDevice, 1, &renderFence, VK_TRUE, UINT64_MAX);
 
         //  Acquire the next swap chain image to render to
         uint32_t currentSwapChainImage;
-        VkResult ret = vkAcquireNextImageKHR(ctx.apiDevice, swapChain.apiObject, UINT64_MAX, ctx.apiSemaphorePresent, VK_NULL_HANDLE, &currentSwapChainImage);
+        VkResult ret = vkAcquireNextImageKHR(ctx.apiDevice, swapChain.apiObject, UINT64_MAX, presentSemaphore, VK_NULL_HANDLE, &currentSwapChainImage);
         if(ret == VK_ERROR_OUT_OF_DATE_KHR)
         {
             wasResized = false;
@@ -1172,10 +1346,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         else if(ret != VK_SUCCESS) ASSERT(0);
 
         // Reset render fence when work is to be submitted
-        vkResetFences(ctx.apiDevice, 1, &ctx.apiFenceRender);
+        vkResetFences(ctx.apiDevice, 1, &renderFence);
 
         // Reset command buffer from previous frame
-        vkResetCommandBuffer(ctx.apiCommandBuffer, 0);
+        vkResetCommandBuffer(commandBuffer, 0);
 
         // Prepare command buffer for recording commands
         VkCommandBufferBeginInfo commandBufferBeginInfo = {};
@@ -1183,7 +1357,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         commandBufferBeginInfo.pNext = NULL;
         commandBufferBeginInfo.pInheritanceInfo = NULL;
         commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        ret = vkBeginCommandBuffer(ctx.apiCommandBuffer, &commandBufferBeginInfo);
+        ret = vkBeginCommandBuffer(commandBuffer, &commandBufferBeginInfo);
         VK_ASSERT(ret);
 
         // Begin render pass
@@ -1201,34 +1375,37 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         clearValue.color = {{flash, flash, flash, 1.0f}};
         renderPassBeginInfo.clearValueCount = 1;
         renderPassBeginInfo.pClearValues = &clearValue;
-        vkCmdBeginRenderPass(ctx.apiCommandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
         // Draw commands
-        vkCmdBindPipeline(ctx.apiCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, defaultPassPipeline.apiObject);
-        vkCmdDraw(ctx.apiCommandBuffer, 3, 1, 0, 0);
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, defaultPassPipeline.apiObject);
+        VkDeviceSize bufferOffset = 0;
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &defaultTriangleVertexBuffer.apiObject, &bufferOffset);
+
+        vkCmdDraw(commandBuffer, defaultTriangleVertexBuffer.count, 1, 0, 0);
 
         // End render pass
-        vkCmdEndRenderPass(ctx.apiCommandBuffer);
+        vkCmdEndRenderPass(commandBuffer);
 
         // Finalize command buffer for submission
-        ret = vkEndCommandBuffer(ctx.apiCommandBuffer);
+        ret = vkEndCommandBuffer(commandBuffer);
         VK_ASSERT(ret);
 
         // Submit command buffer
         VkSubmitInfo submitInfo = {};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &ctx.apiCommandBuffer;
+        submitInfo.pCommandBuffers = &commandBuffer;
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         submitInfo.pWaitDstStageMask = &waitStage;
         //      Wait for present semaphore, to ensure swap chain image is ready
         submitInfo.waitSemaphoreCount = 1;
-        submitInfo.pWaitSemaphores = &ctx.apiSemaphorePresent;
+        submitInfo.pWaitSemaphores = &presentSemaphore;
         //      Signal render semaphore, to indicate render commands have all been executed
         submitInfo.signalSemaphoreCount = 1;
-        submitInfo.pSignalSemaphores = &ctx.apiSemaphoreRender;
+        submitInfo.pSignalSemaphores = &renderSemaphore;
         
-        ret = vkQueueSubmit(ctx.apiCommandQueue, 1, &submitInfo, ctx.apiFenceRender);
+        ret = vkQueueSubmit(ctx.apiCommandQueue, 1, &submitInfo, renderFence);
         VK_ASSERT(ret);
 
         // Present image to window
@@ -1238,7 +1415,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         presentInfo.swapchainCount = 1;
         presentInfo.pSwapchains = &swapChain.apiObject;
         presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = &ctx.apiSemaphoreRender;
+        presentInfo.pWaitSemaphores = &renderSemaphore;
         presentInfo.pImageIndices = &currentSwapChainImage;
         ret = vkQueuePresentKHR(ctx.apiCommandQueue, &presentInfo);
         if(ret == VK_ERROR_OUT_OF_DATE_KHR || ret == VK_SUBOPTIMAL_KHR || wasResized)
@@ -1249,12 +1426,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         else if(ret != VK_SUCCESS) ASSERT(0);
 
         currentFrame++;
+        inFlightFrame = currentFrame % RENDERER_MAX_FRAMES_IN_FLIGHT;
     }
 
     // ======================================================================
     // Render cleanup
 
     vkDeviceWaitIdle(ctx.apiDevice);
+    DestroyBuffer(&ctx, defaultTriangleVertexBuffer);
     DestroyGraphicsPipeline(&ctx, &defaultPassPipeline);
     DestroyRenderPass(&ctx, &presentRenderPass);
     DestroySwapChain(&ctx, &swapChain);
