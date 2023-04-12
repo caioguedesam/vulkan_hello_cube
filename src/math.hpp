@@ -143,10 +143,10 @@ struct m4f
     {
         struct
         {
-            f32 m00; f32 m01; f32 m02; f32 m03;
-            f32 m10; f32 m11; f32 m12; f32 m13;
-            f32 m20; f32 m21; f32 m22; f32 m23;
-            f32 m30; f32 m31; f32 m32; f32 m33;
+            f32 m00 = 0; f32 m01 = 0; f32 m02 = 0; f32 m03 = 0;
+            f32 m10 = 0; f32 m11 = 0; f32 m12 = 0; f32 m13 = 0;
+            f32 m20 = 0; f32 m21 = 0; f32 m22 = 0; f32 m23 = 0;
+            f32 m30 = 0; f32 m31 = 0; f32 m32 = 0; f32 m33 = 0;
         };
         f32 data[16];
     };
@@ -173,6 +173,9 @@ v3f TransformDirection(const v3f& direction, const m4f& transform);
 m4f LookAtMatrix(const v3f& center, const v3f& target, const v3f& up);
 m4f PerspectiveProjectionMatrix(const f32& fovY, const f32& aspectRatio, const f32& nearPlane, const f32& farPlane);
 m4f OrthographicProjectionMatrix(const f32& left, const f32& right, const f32& bottom, const f32& top, const f32& nearPlane, const f32& farPlane);
+
+m4f VkViewMatrix(v3f center, v3f target, v3f up);
+m4f VkPerspectiveProjectionMatrix(f32 fovY, f32 aspect, f32 nearPlane, f32 farPlane);
 
 // Math utilities
 f32 Lerp(const f32& a, const f32& b, const f32& t);

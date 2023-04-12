@@ -11,6 +11,8 @@
 
 #include <math.hpp>
 
+#include <math.cpp>
+
 #define SHADER_PATH "./debug/"
 
 void Assert(uint64_t expr, const char* msg)
@@ -172,6 +174,7 @@ struct RenderContext
     VkSemaphore apiRenderSemaphores[RENDERER_MAX_FRAMES_IN_FLIGHT];
     VkSemaphore apiPresentSemaphores[RENDERER_MAX_FRAMES_IN_FLIGHT];
     VkFence apiRenderFences[RENDERER_MAX_FRAMES_IN_FLIGHT];
+
 };
 
 RenderContext CreateRenderContext(const char* appName, const char* engineName, HWND osWindow, HINSTANCE osInstance)
@@ -839,21 +842,13 @@ void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRende
 // ===================================================================
 // Graphics resources
 
-// Position (v2f), Vertex color (v3f)
+// Position (v3f), Vertex color (v3f)
 f32 defaultTriangleVertices[] =
 {
-    //-0.5f, -0.5f, 1, 0, 0,
-     //0.5f, -0.5f, 0, 1, 0,
-     //0.5f,  0.5f, 0, 0, 1,
-
-    //-0.5f, -0.5f, 1, 0, 0,
-     //0.5f,  0.5f, 0, 1, 0,
-    //-0.5f,  0.5f, 0, 0, 1,
-
-    -0.5f, -0.5f, 1, 0, 0,
-     0.5f, -0.5f, 0, 1, 0,
-     0.5f,  0.5f, 1, 1, 1,
-    -0.5f,  0.5f, 0, 0, 1,
+    -0.5f, -0.5f, 0.f, 1, 0, 0,
+     0.5f, -0.5f, 0.f, 0, 1, 0,
+     0.5f,  0.5f, 0.f, 1, 1, 1,
+    -0.5f,  0.5f, 0.f, 0, 0, 1,
 };
 
 u32 defaultTriangleIndices[] =
@@ -865,11 +860,13 @@ enum BufferType
 {
     BUFFER_TYPE_VERTEX,
     BUFFER_TYPE_INDEX,
+    BUFFER_TYPE_UNIFORM,
 };
 VkBufferUsageFlags bufferTypeToVk[] =
 {
     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
     VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 };
 
 struct Buffer
@@ -892,6 +889,7 @@ Buffer CreateBuffer(RenderContext* ctx, BufferType type, u32 size, u32 count, u8
     bufferInfo.size = size;
     bufferInfo.usage = bufferTypeToVk[type];
 
+    //TODO(caio): Allow for changing allocation params later on
     VmaAllocationCreateInfo allocationInfo = {};
     allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
     allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
@@ -902,10 +900,13 @@ Buffer CreateBuffer(RenderContext* ctx, BufferType type, u32 size, u32 count, u8
     VK_ASSERT(ret);
 
     // Copy buffer data (later move to staging buffer)
-    void* bufferDataMapping = NULL;
-    vmaMapMemory(ctx->apiMemoryAllocator, allocation, &bufferDataMapping);
-    memcpy(bufferDataMapping, data, size);
-    vmaUnmapMemory(ctx->apiMemoryAllocator, allocation);
+    if(data)
+    {
+        void* bufferDataMapping = NULL;
+        vmaMapMemory(ctx->apiMemoryAllocator, allocation, &bufferDataMapping);
+        memcpy(bufferDataMapping, data, size);
+        vmaUnmapMemory(ctx->apiMemoryAllocator, allocation);
+    }
 
     Buffer result = {};
     result.type = type;
@@ -923,6 +924,7 @@ void DestroyBuffer(RenderContext* ctx, Buffer buffer)
     ASSERT(ctx->apiMemoryAllocator != VK_NULL_HANDLE);
     vmaDestroyBuffer(ctx->apiMemoryAllocator, buffer.apiObject, buffer.apiAllocation);
 }
+
 
 // ===================================================================
 // Graphics pipeline
@@ -1092,6 +1094,7 @@ GraphicsPipeline CreateGraphicsPipeline(
         InputAssemblyState inputAssemblyState,
         ShaderAsset vs, ShaderAsset ps, 
         VertexLayout vertexLayout,
+        VkDescriptorSetLayout descriptorSetLayout,  // TODO(caio): Remove this from here when making shader resource abstraction
         RasterizerState rasterizerState)
 {
     ASSERT(ctx->apiDevice != VK_NULL_HANDLE);
@@ -1186,8 +1189,10 @@ GraphicsPipeline CreateGraphicsPipeline(
     // Pipeline layout (for uniform buffers, currently empty)
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 0;
-    pipelineLayoutInfo.pSetLayouts = NULL;
+    //pipelineLayoutInfo.setLayoutCount = 0;
+    //pipelineLayoutInfo.pSetLayouts = NULL;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
     pipelineLayoutInfo.pushConstantRangeCount = 0;
     pipelineLayoutInfo.pPushConstantRanges = NULL;
     VkPipelineLayout pipelineLayout;
@@ -1237,6 +1242,97 @@ void DestroyGraphicsPipeline(RenderContext* ctx, GraphicsPipeline* pipeline)
 }
 
 // ======================================================================
+// Application data
+
+struct FrameData
+{
+    m4f view = {};
+    m4f proj = {};
+};
+
+struct FrameResources
+{
+    Buffer ub_FrameData;
+    VkDescriptorSet apiFrameDescriptorSet = VK_NULL_HANDLE;
+};
+
+struct GlobalResourceData
+{
+    // TODO(caio): Move these out of here when abstracting shader resources
+    VkDescriptorSetLayout apiFrameDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool apiFrameDescriptorPool = VK_NULL_HANDLE;
+};
+
+void InitFrameResources(RenderContext* ctx, FrameResources* frameResources, u32 frameCount, GlobalResourceData* globalResourceData)
+{
+    // Defining descriptor set layout
+    VkDescriptorSetLayoutBinding frameDataBinding = {};
+    frameDataBinding.binding = 0;
+    frameDataBinding.descriptorCount = 1;
+    frameDataBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    frameDataBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    VkDescriptorSetLayoutCreateInfo descriptorSetLayoutInfo = {};
+    descriptorSetLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    descriptorSetLayoutInfo.bindingCount = 1;
+    descriptorSetLayoutInfo.pBindings = &frameDataBinding;
+    VkResult ret = vkCreateDescriptorSetLayout(ctx->apiDevice, &descriptorSetLayoutInfo, NULL, &globalResourceData->apiFrameDescriptorSetLayout);
+    VK_ASSERT(ret);
+
+    // Allocating descriptor set
+    VkDescriptorPoolSize descriptorPoolSize =
+    {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10
+    };
+    VkDescriptorPoolCreateInfo descriptorPoolInfo = {};
+    descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    descriptorPoolInfo.poolSizeCount = 1;
+    descriptorPoolInfo.pPoolSizes = &descriptorPoolSize;
+    descriptorPoolInfo.maxSets = 10;
+    ret = vkCreateDescriptorPool(ctx->apiDevice, &descriptorPoolInfo, NULL, &globalResourceData->apiFrameDescriptorPool);
+    VK_ASSERT(ret);
+
+    // Allocating resources and descriptor sets
+    for(i32 i = 0; i < frameCount; i++)
+    {
+        // Allocating uniform buffer
+        frameResources[i].ub_FrameData = CreateBuffer(ctx, BUFFER_TYPE_UNIFORM, sizeof(FrameData), 1, NULL);
+
+        // Then descriptor set to point to said buffer
+        VkDescriptorSetAllocateInfo descriptorSetAllocInfo = {};
+        descriptorSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        descriptorSetAllocInfo.descriptorPool = globalResourceData->apiFrameDescriptorPool;
+        descriptorSetAllocInfo.descriptorSetCount = 1;
+        descriptorSetAllocInfo.pSetLayouts = &globalResourceData->apiFrameDescriptorSetLayout;
+        ret = vkAllocateDescriptorSets(ctx->apiDevice, &descriptorSetAllocInfo, &frameResources[i].apiFrameDescriptorSet);
+        VK_ASSERT(ret);
+
+        // Then bind descriptor set to buffer resource
+        VkDescriptorBufferInfo descriptorBufferInfo = {};
+        descriptorBufferInfo.buffer = frameResources[i].ub_FrameData.apiObject;
+        descriptorBufferInfo.offset = 0;
+        descriptorBufferInfo.range = frameResources[i].ub_FrameData.size;
+        VkWriteDescriptorSet descriptorSetWrite = {};
+        descriptorSetWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorSetWrite.dstBinding = 0;
+        descriptorSetWrite.dstSet = frameResources[i].apiFrameDescriptorSet;
+        descriptorSetWrite.descriptorCount = 1;
+        descriptorSetWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorSetWrite.pBufferInfo = &descriptorBufferInfo;
+        vkUpdateDescriptorSets(ctx->apiDevice, 1, &descriptorSetWrite, 0, NULL);
+    }
+}
+
+void DestroyFrameResources(RenderContext* ctx, FrameResources* frameResources, u32 frameCount, GlobalResourceData* globalResourceData)
+{
+    for(i32 i = 0; i < frameCount; i++)
+    {
+        DestroyBuffer(ctx, frameResources[i].ub_FrameData);
+    }
+    vkDestroyDescriptorSetLayout(ctx->apiDevice, globalResourceData->apiFrameDescriptorSetLayout, NULL);
+    vkDestroyDescriptorPool(ctx->apiDevice, globalResourceData->apiFrameDescriptorPool, NULL);
+}
+
+// ======================================================================
 // Application main function
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nCmdShow)
 {
@@ -1271,6 +1367,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     SwapChain swapChain = CreateSwapChain(&ctx);
 
     // Resource creation
+    FrameResources frameResources[RENDERER_MAX_FRAMES_IN_FLIGHT];
+    GlobalResourceData globalResourceData = {};
+    InitFrameResources(&ctx, frameResources, RENDERER_MAX_FRAMES_IN_FLIGHT, &globalResourceData);
     Buffer defaultTriangleVertexBuffer = CreateBuffer(&ctx, BUFFER_TYPE_VERTEX,
             sizeof(defaultTriangleVertices), sizeof(defaultTriangleVertices) / (5 * sizeof(f32)), (u8*)defaultTriangleVertices);
     Buffer defaultTriangleIndexBuffer = CreateBuffer(&ctx, BUFFER_TYPE_INDEX,
@@ -1307,7 +1406,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     InputAssemblyState defaultPassInputAssemblyState = {};
     defaultPassInputAssemblyState.primitive = PRIMITIVE_TRIANGLE_LIST;
 
-    VertexFormat defaultPassVertexAttributeFormats[] = { VERTEX_FORMAT_R32G32_FLOAT, VERTEX_FORMAT_R32G32B32_FLOAT };
+    VertexFormat defaultPassVertexAttributeFormats[] = { VERTEX_FORMAT_R32G32B32_FLOAT, VERTEX_FORMAT_R32G32B32_FLOAT };
     VertexLayout defaultPassVertexLayout = CreateVertexLayout(0, 2, defaultPassVertexAttributeFormats);
 
     RasterizerState defaultPassRasterizerState = {};
@@ -1315,8 +1414,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     defaultPassRasterizerState.cullMode = CULL_MODE_BACK;
     defaultPassRasterizerState.frontFace = FRONT_FACE_CCW;
     GraphicsPipeline defaultPassPipeline = CreateGraphicsPipeline(&ctx, &presentRenderPass,
-            defaultPassInputAssemblyState, shader_TriangleVS, shader_TrianglePS, defaultPassVertexLayout, defaultPassRasterizerState);
+            defaultPassInputAssemblyState, shader_TriangleVS, shader_TrianglePS, 
+            defaultPassVertexLayout, globalResourceData.apiFrameDescriptorSetLayout, defaultPassRasterizerState);
 
+
+    FrameData frameData;
 
     // ======================================================================
     // Render loop (still not abstracted)
@@ -1353,6 +1455,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         // Reset command buffer from previous frame
         vkResetCommandBuffer(commandBuffer, 0);
 
+        v3f cameraPosition = {2,2,2};
+        v3f cameraTarget = {0,0,0};
+        f32 fov = TO_RAD(45.f);
+        f32 aspect = (f32)windowWidth / (f32)windowHeight;
+        f32 nearPlane = 0.1f;
+        f32 farPlane = 100.f;
+
+        frameData.view = Transpose(LookAtMatrix(cameraPosition, cameraTarget, {0,1,0}));
+        frameData.proj = Transpose(PerspectiveProjectionMatrix(fov, aspect, nearPlane, farPlane));
+
+        void* frameDataBufferMapping;
+        vmaMapMemory(ctx.apiMemoryAllocator, frameResources[inFlightFrame].ub_FrameData.apiAllocation, &frameDataBufferMapping);
+        memcpy(frameDataBufferMapping, &frameData, sizeof(FrameData));
+        vmaUnmapMemory(ctx.apiMemoryAllocator, frameResources[inFlightFrame].ub_FrameData.apiAllocation);
+
         // Prepare command buffer for recording commands
         VkCommandBufferBeginInfo commandBufferBeginInfo = {};
         commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1386,9 +1503,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         // Note: viewport y and height are flipped, to match OpenGL bottom-left instead of
         // Vulkan's default top-left coordinate system.
         viewport.x = 0.f;
-        viewport.y = (f32)presentRenderPass.outputHeight;
-        viewport.width = presentRenderPass.outputWidth;
-        viewport.height = -(f32)presentRenderPass.outputHeight;
+        //viewport.y = (f32)presentRenderPass.outputHeight;
+        viewport.y = 0.f;
+        viewport.width = (f32)presentRenderPass.outputWidth;
+        //viewport.height = -(f32)presentRenderPass.outputHeight;
+        viewport.height = (f32)presentRenderPass.outputHeight;
         viewport.minDepth = 0.f;
         viewport.maxDepth = 1.f;
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -1400,6 +1519,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         VkDeviceSize bufferOffset = 0;
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, &defaultTriangleVertexBuffer.apiObject, &bufferOffset);
         vkCmdBindIndexBuffer(commandBuffer, defaultTriangleIndexBuffer.apiObject, 0, VK_INDEX_TYPE_UINT32);
+
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, defaultPassPipeline.apiPipelineLayout, 0, 1,
+                &frameResources[inFlightFrame].apiFrameDescriptorSet, 0, NULL);
 
         //vkCmdDraw(commandBuffer, defaultTriangleVertexBuffer.count, 1, 0, 0);
         vkCmdDrawIndexed(commandBuffer, defaultTriangleIndexBuffer.count, 1, 0, 0, 0);
@@ -1453,6 +1575,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     // Render cleanup
 
     vkDeviceWaitIdle(ctx.apiDevice);
+    DestroyFrameResources(&ctx, frameResources, RENDERER_MAX_FRAMES_IN_FLIGHT, &globalResourceData);
     DestroyBuffer(&ctx, defaultTriangleVertexBuffer);
     DestroyBuffer(&ctx, defaultTriangleIndexBuffer);
     DestroyGraphicsPipeline(&ctx, &defaultPassPipeline);

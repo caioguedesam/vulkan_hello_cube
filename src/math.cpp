@@ -540,7 +540,7 @@ v3f TransformDirection(const v3f& direction, const m4f& transform)
 
 m4f LookAtMatrix(const v3f& center, const v3f& target, const v3f& up)
 {
-    v3f lookDir = Normalize(center - target);  // TODO(caio)#MATH: OpenGL convention is camera pointing to Z negative, so mind this when passing to OpenGL.
+    v3f lookDir = Normalize(center - target);
     v3f lookRight = Normalize(Cross(up, lookDir));
     v3f lookUp = Normalize(Cross(lookDir, lookRight));
     m4f lookRotation =
@@ -567,7 +567,11 @@ m4f PerspectiveProjectionMatrix(const f32& fovY, const f32& aspectRatio, const f
         (right + left) / (right - left), (top + bottom) / (top - bottom), -(farPlane + nearPlane) / (farPlane - nearPlane), -1,
         0, 0, -(2 * farPlane * nearPlane) / (farPlane - nearPlane), 0,
     };
-    return Transpose(result);   // TODO(caio)#MATH: OpenGL convention transposes this matrix. Figure out later.
+    result.m11 *= -1;           // m11 needs to be scaled by -1 to account for coordinate system conversion.
+                                // My math library uses LEFT-HANDED, while vulkan uses RIGHT-HANDED.
+    
+    return Transpose(result);   // TODO(caio): Figure out why this transpose is needed since I'm already
+                                // transposing when sending to shaders
 }
 
 m4f OrthographicProjectionMatrix(const f32& left, const f32& right, const f32& bottom, const f32& top, const f32& nearPlane, const f32& farPlane)
@@ -579,7 +583,7 @@ m4f OrthographicProjectionMatrix(const f32& left, const f32& right, const f32& b
         0, 0, 2.f / (farPlane - nearPlane), 0,
         -(right + left) / (right - left), -(top + bottom) / (top - bottom), -(farPlane + nearPlane) / (farPlane - nearPlane), 1,
     };
-    return Transpose(result);   // TODO(caio)#MATH: OpenGL convention transposes this matrix. Figure out later.
+    return result;
 }
 
 f32 Lerp(const f32& a, const f32& b, const f32& t)
