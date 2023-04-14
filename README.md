@@ -1,12 +1,12 @@
 # Vulkan Hello Cube
 
-My first project using the Vulkan graphics API. The intent is to render a textured cube that spins at an angle from the camera.
+My first project using the Vulkan graphics API.
 
-This project has two goals: helping me learn Vulkan and be a starting point to use when porting [Typheus](https://www.google.com) from OpenGL to Vulkan.
+This was mostly an experiment to learn Vulkan, and as such there's no concern for code quality, readability, maintainablity, etc.
 
-As of this moment, I have a hardcoded color-interpolated triangle being rendered.
+The application renders two rotating cubes at a fixed angle, with proper texture mapping (texture assets not included) and depth testing.
 
-![result](https://i.imgur.com/llRxrdY.png)
+![result](https://i.imgur.com/9kLMCby.gif)
 ------
 ### Build instructions
 
