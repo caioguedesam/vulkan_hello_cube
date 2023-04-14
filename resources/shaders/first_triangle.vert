@@ -10,15 +10,21 @@ layout (location = 0) out vec3 vOut_color;
 layout (location = 1) out vec2 vOut_texCoord;
 
 // Uniforms
-layout(set = 0, binding = 0) uniform FrameData
+layout (set = 0, binding = 0) uniform FrameData
 {
     mat4 view;
     mat4 proj;
 } ub_FrameData;
 
+// Constant Buffer
+layout (push_constant) uniform constants
+{
+    mat4 model;
+} cb_ObjData;
+
 void main()
 {
-    gl_Position = ub_FrameData.proj * ub_FrameData.view * vec4(vIn_position, 1);
+    gl_Position = ub_FrameData.proj * ub_FrameData.view * cb_ObjData.model * vec4(vIn_position, 1);
     //gl_Position = vec4(vIn_position, 1);
     vOut_color = vIn_color;
     vOut_texCoord = vIn_texCoord;

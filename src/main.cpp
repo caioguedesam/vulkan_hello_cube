@@ -911,15 +911,23 @@ void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRende
 // Position (v3f), Vertex color (v3f), Texture coordinates (v2f)
 f32 defaultTriangleVertices[] =
 {
-    -0.5f, -0.5f, 0.f, 1, 0, 0, 0.f, 1.f,
-     0.5f, -0.5f, 0.f, 0, 1, 0, 1.f, 1.f,
-     0.5f,  0.5f, 0.f, 1, 1, 1, 1.f, 0.f,
-    -0.5f,  0.5f, 0.f, 0, 0, 1, 0.f, 0.f,
+    // Front face
+    -1.f, -1.f, 1.f, 1, 0, 0, 0.f, 1.f,   // BL
+     1.f, -1.f, 1.f, 0, 1, 0, 1.f, 1.f,   // BR
+     1.f,  1.f, 1.f, 1, 1, 1, 1.f, 0.f,   // TR
+    -1.f,  1.f, 1.f, 0, 0, 1, 0.f, 0.f,   // TL
+
+    // Back face
+     1.f, -1.f, -1.f, 1, 0, 0, 0.f, 1.f,   // BL
+    -1.f, -1.f, -1.f, 0, 1, 0, 1.f, 1.f,   // BR
+    -1.f,  1.f, -1.f, 1, 1, 1, 1.f, 0.f,   // TR
+     1.f,  1.f, -1.f, 0, 0, 1, 0.f, 0.f,   // TL
 };
 
 u32 defaultTriangleIndices[] =
 {
     0, 1, 2, 0, 2, 3,
+    4, 5, 6, 4, 6, 7,
 };
 
 enum BufferType
@@ -1322,6 +1330,11 @@ struct RasterizerState
     FrontFace frontFace = FRONT_FACE_CW;
 };
 
+struct PushConstants
+{
+    m4f model = {};
+};
+
 struct GraphicsPipeline
 {
     VkPipeline apiObject = VK_NULL_HANDLE;
@@ -1437,6 +1450,12 @@ GraphicsPipeline CreateGraphicsPipeline(
     colorBlendInfo.attachmentCount = 1;
     colorBlendInfo.pAttachments = &colorBlendAttachment;
 
+    // Push constants (hardcoded)
+    VkPushConstantRange pushConstantRange = {};
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(PushConstants);
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
     // Pipeline layout (for uniform buffers, currently empty)
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1444,8 +1463,8 @@ GraphicsPipeline CreateGraphicsPipeline(
     //pipelineLayoutInfo.pSetLayouts = NULL;
     pipelineLayoutInfo.setLayoutCount = 1;
     pipelineLayoutInfo.pSetLayouts = &descriptorSetLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 0;
-    pipelineLayoutInfo.pPushConstantRanges = NULL;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
     VkPipelineLayout pipelineLayout;
     ret = vkCreatePipelineLayout(ctx->apiDevice, &pipelineLayoutInfo, NULL, &pipelineLayout);
     VK_ASSERT(ret);
@@ -1506,6 +1525,7 @@ struct FrameResources
     Buffer ub_FrameData;
     VkDescriptorSet apiFrameDescriptorSet = VK_NULL_HANDLE;
 };
+
 
 struct ShaderResourceData
 {
@@ -1688,7 +1708,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
 
     RasterizerState defaultPassRasterizerState = {};
     defaultPassRasterizerState.fillMode = FILL_MODE_SOLID;
-    defaultPassRasterizerState.cullMode = CULL_MODE_BACK;
+    //defaultPassRasterizerState.cullMode = CULL_MODE_BACK;
+    defaultPassRasterizerState.cullMode = CULL_MODE_NONE;
     defaultPassRasterizerState.frontFace = FRONT_FACE_CCW;
     GraphicsPipeline defaultPassPipeline = CreateGraphicsPipeline(&ctx, &presentRenderPass,
             defaultPassInputAssemblyState, shader_TriangleVS, shader_TrianglePS, 
@@ -1799,6 +1820,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
 
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, defaultPassPipeline.apiPipelineLayout, 0, 1,
                 &frameResources[inFlightFrame].apiFrameDescriptorSet, 0, NULL);
+
+        // Push constants
+        PushConstants objData = {};
+        objData.model = Identity();
+        float angle = (currentFrame / 2000.f);
+        objData.model = ScaleMatrix({0.5f, 0.5f, 0.5f}) * RotationMatrix(angle, {0, 1, 0}) * objData.model;
+        vkCmdPushConstants(commandBuffer, defaultPassPipeline.apiPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &objData);
 
         //vkCmdDraw(commandBuffer, defaultTriangleVertexBuffer.count, 1, 0, 0);
         vkCmdDrawIndexed(commandBuffer, defaultTriangleIndexBuffer.count, 1, 0, 0, 0);
