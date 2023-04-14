@@ -8,12 +8,15 @@
 #include <vulkan/vulkan_win32.h>
 #define VMA_IMPLEMENTATION
 #include <vma/vk_mem_alloc.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 
 #include <math.hpp>
 
 #include <math.cpp>
 
 #define SHADER_PATH "./debug/"
+#define TEXTURE_PATH "../resources/textures/"
 
 void Assert(uint64_t expr, const char* msg)
 {
@@ -175,6 +178,10 @@ struct RenderContext
     VkSemaphore apiPresentSemaphores[RENDERER_MAX_FRAMES_IN_FLIGHT];
     VkFence apiRenderFences[RENDERER_MAX_FRAMES_IN_FLIGHT];
 
+    // For immediate gpu commands
+    VkFence apiImmediateFence = VK_NULL_HANDLE;
+    VkCommandPool apiImmediateCommandPool = VK_NULL_HANDLE;
+    VkCommandBuffer apiImmediateCommandBuffer = VK_NULL_HANDLE;
 };
 
 RenderContext CreateRenderContext(const char* appName, const char* engineName, HWND osWindow, HINSTANCE osInstance)
@@ -374,6 +381,8 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
     commandPoolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     VkCommandPool commandPool;
     ret = vkCreateCommandPool(device, &commandPoolInfo, NULL, &commandPool);
+    VkCommandPool immediateCommandPool;
+    ret = vkCreateCommandPool(device, &commandPoolInfo, NULL, &immediateCommandPool);
     VK_ASSERT(ret);
 
     VkCommandBuffer commandBuffers[RENDERER_MAX_FRAMES_IN_FLIGHT];
@@ -388,6 +397,15 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
         ret = vkAllocateCommandBuffers(device, &commandBufferAllocInfo, &commandBuffers[i]);
         VK_ASSERT(ret);
     }
+    VkCommandBufferAllocateInfo immediateCommandBufferAllocInfo = {};
+    immediateCommandBufferAllocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    immediateCommandBufferAllocInfo.commandBufferCount = 1;
+    immediateCommandBufferAllocInfo.commandPool = commandPool;
+    immediateCommandBufferAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    immediateCommandBufferAllocInfo.pNext = NULL;
+    VkCommandBuffer immediateCommandBuffer;
+    ret = vkAllocateCommandBuffers(device, &immediateCommandBufferAllocInfo, &immediateCommandBuffer);
+    VK_ASSERT(ret);
 
     // Creating default render/present sync structures
     VkSemaphore renderSemaphores[RENDERER_MAX_FRAMES_IN_FLIGHT];
@@ -412,6 +430,13 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
         VK_ASSERT(ret);
     }
 
+    VkFenceCreateInfo immediateFenceInfo = {};
+    immediateFenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    immediateFenceInfo.pNext = NULL;
+    VkFence immediateFence;
+    ret = vkCreateFence(device, &immediateFenceInfo, NULL, &immediateFence);
+    VK_ASSERT(ret);
+
     RenderContext result = {};
     result.apiInstance = instance;
     result.apiSurface = surface;
@@ -431,6 +456,9 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
         result.apiPresentSemaphores[i] = presentSemaphores[i];
         result.apiRenderFences[i] = renderFences[i];
     }
+    result.apiImmediateCommandPool = immediateCommandPool;
+    result.apiImmediateCommandBuffer = immediateCommandBuffer;
+    result.apiImmediateFence = immediateFence;
 
     return result;
 }
@@ -444,8 +472,10 @@ void DestroyRenderContext(RenderContext* ctx)
         vkDestroySemaphore(ctx->apiDevice, ctx->apiPresentSemaphores[i], NULL);
         vkDestroyFence(ctx->apiDevice, ctx->apiRenderFences[i], NULL);
     }
+    vkDestroyFence(ctx->apiDevice, ctx->apiImmediateFence, NULL);
     vmaDestroyAllocator(ctx->apiMemoryAllocator);
     vkDestroyCommandPool(ctx->apiDevice, ctx->apiCommandPool, NULL);
+    vkDestroyCommandPool(ctx->apiDevice, ctx->apiImmediateCommandPool, NULL);
     vkDestroyDevice(ctx->apiDevice, NULL);
 #if _DEBUG
     VK_GET_IPROC(ctx->apiInstance, DestroyDebugUtilsMessengerEXT);
@@ -455,6 +485,34 @@ void DestroyRenderContext(RenderContext* ctx)
     vkDestroyInstance(ctx->apiInstance, NULL);
 
     *ctx = {};
+}
+
+void BeginImmediateCommands(RenderContext* ctx)
+{
+    VkCommandBufferBeginInfo commandBufferBeginInfo = {};
+    commandBufferBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    commandBufferBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VkResult ret = vkBeginCommandBuffer(ctx->apiImmediateCommandBuffer, &commandBufferBeginInfo);
+    VK_ASSERT(ret);
+}
+
+void SubmitImmediateCommands(RenderContext* ctx)
+{
+    VkResult ret = vkEndCommandBuffer(ctx->apiImmediateCommandBuffer);
+    VK_ASSERT(ret);
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &ctx->apiImmediateCommandBuffer;
+    
+    ret = vkQueueSubmit(ctx->apiCommandQueue, 1, &submitInfo, ctx->apiImmediateFence);
+    VK_ASSERT(ret);
+
+    // Immediate submit waits until commands are done to proceed.
+    vkWaitForFences(ctx->apiDevice, 1, &ctx->apiImmediateFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(ctx->apiDevice, 1, &ctx->apiImmediateFence);
+    vkResetCommandPool(ctx->apiDevice, ctx->apiImmediateCommandPool, 0);
 }
 
 #define SURFACE_MAX_FORMATS         16
@@ -646,11 +704,13 @@ VkAttachmentStoreOp renderPassStoreOpToVk[] =
 // TODO(caio): Move this out of here when doing texture/image resources
 enum ImageFormat
 {
-    IMAGE_FORMAT_B8G8R8A8_SRGB,
+    IMAGE_FORMAT_BGRA8_SRGB,
+    IMAGE_FORMAT_RGBA8_SRGB,
 };
 VkFormat imageFormatToVk[] =
 {
     VK_FORMAT_B8G8R8A8_SRGB,
+    VK_FORMAT_R8G8B8A8_SRGB,
 };
 
 enum ImageLayout
@@ -658,12 +718,16 @@ enum ImageLayout
     IMAGE_LAYOUT_UNDEFINED,
     IMAGE_LAYOUT_COLOR_OUTPUT_OPTIMAL,
     IMAGE_LAYOUT_PRESENT_SRC,
+    IMAGE_LAYOUT_TRANSFER_DST,
+    IMAGE_LAYOUT_SHADER_RO,
 };
 VkImageLayout imageLayoutToVk[] =
 {
     VK_IMAGE_LAYOUT_UNDEFINED,
     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 };
 
 struct RenderPassColorOutputInfo
@@ -672,7 +736,7 @@ struct RenderPassColorOutputInfo
     RenderPassStoreOp storeOp    = RENDER_PASS_STORE_OP_DONT_CARE;
     ImageLayout initialLayout    = IMAGE_LAYOUT_UNDEFINED;
     ImageLayout finalLayout      = IMAGE_LAYOUT_UNDEFINED;
-    ImageFormat format           = IMAGE_FORMAT_B8G8R8A8_SRGB;
+    ImageFormat format           = IMAGE_FORMAT_BGRA8_SRGB;
 };
 
 #define RENDER_PASS_MAX_FRAME_COUNT  4     // Multiple framebuffers for double/triple-buffering support
@@ -821,7 +885,7 @@ void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRende
             RENDER_PASS_STORE_OP_STORE,
             IMAGE_LAYOUT_UNDEFINED,
             IMAGE_LAYOUT_PRESENT_SRC,
-            IMAGE_FORMAT_B8G8R8A8_SRGB,
+            IMAGE_FORMAT_BGRA8_SRGB,
         }
     };
     // Each swap chain image is tied to the first color output of each frame in the present pass.
@@ -861,12 +925,14 @@ enum BufferType
     BUFFER_TYPE_VERTEX,
     BUFFER_TYPE_INDEX,
     BUFFER_TYPE_UNIFORM,
+    BUFFER_TYPE_STAGING,
 };
 VkBufferUsageFlags bufferTypeToVk[] =
 {
     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
     VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 };
 
 struct Buffer
@@ -925,6 +991,144 @@ void DestroyBuffer(RenderContext* ctx, Buffer buffer)
     vmaDestroyBuffer(ctx->apiMemoryAllocator, buffer.apiObject, buffer.apiAllocation);
 }
 
+enum TextureType
+{
+    TEXTURE_TYPE_2D,
+};
+VkImageType textureTypeToVk[] =
+{
+    VK_IMAGE_TYPE_2D,
+};
+VkImageViewType textureTypeToVkView[] =
+{
+    VK_IMAGE_VIEW_TYPE_2D,
+};
+
+struct Texture
+{
+    VkImage apiObject = VK_NULL_HANDLE;
+    VmaAllocation apiAllocation;
+    TextureType type = TEXTURE_TYPE_2D;
+    ImageFormat format = IMAGE_FORMAT_RGBA8_SRGB;
+    u32 width = 0;
+    u32 height = 0;
+    u32 channels = 0;
+};
+
+Texture CreateTextureFromFile(RenderContext* ctx, const char* assetPath)
+{
+    // Load texture asset to CPU
+    i32 textureWidth = -1;
+    i32 textureHeight = -1;
+    i32 textureChannels = -1;
+
+    u8* textureData = (u8*)stbi_load(assetPath, &textureWidth, &textureHeight, &textureChannels, STBI_rgb_alpha);
+    ASSERT(textureData);
+    
+    // Make GPU staging buffer for later usage as transfer src to texture resource
+    VkDeviceSize textureSize = textureWidth * textureHeight * 4;    // Hardcoded to RGBA8, 4 bytes per pixel
+    Buffer stagingBuffer = CreateBuffer(ctx, BUFFER_TYPE_STAGING, (u32)textureSize, 1, textureData);
+
+    // Now create the texture resource
+    TextureType textureType = TEXTURE_TYPE_2D;
+    ImageFormat textureFormat = IMAGE_FORMAT_RGBA8_SRGB;            // Hardcoded to RGBA8
+    VkImageCreateInfo textureCreateInfo = {};
+    textureCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    textureCreateInfo.imageType = textureTypeToVk[textureType];
+    textureCreateInfo.extent.width = (u32)textureWidth;
+    textureCreateInfo.extent.height = (u32)textureHeight;
+    textureCreateInfo.extent.depth = 1;
+    textureCreateInfo.mipLevels = 1;
+    textureCreateInfo.arrayLayers = 1;
+    textureCreateInfo.format = imageFormatToVk[textureFormat];
+    textureCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    textureCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;    // Hardcoded
+    textureCreateInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;    // Hardcoded
+    textureCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    textureCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    textureCreateInfo.flags = 0;
+
+    VmaAllocationCreateInfo allocationInfo = {};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    //allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+    VkImage apiObject;
+    VmaAllocation apiAllocation;
+    VkResult ret = vmaCreateImage(ctx->apiMemoryAllocator, &textureCreateInfo, &allocationInfo, &apiObject, &apiAllocation, NULL);
+    VK_ASSERT(ret);
+
+    // Transition the image resource layout to transfer dest
+    BeginImmediateCommands(ctx);
+    VkImageMemoryBarrier resourceBarrier = {};
+    resourceBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    resourceBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    resourceBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    resourceBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    resourceBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    resourceBarrier.image = apiObject;
+    resourceBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    resourceBarrier.subresourceRange.baseMipLevel = 0;
+    resourceBarrier.subresourceRange.levelCount = 1;
+    resourceBarrier.subresourceRange.baseArrayLayer = 0;
+    resourceBarrier.subresourceRange.layerCount = 1;
+    resourceBarrier.srcAccessMask = 0;
+    resourceBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(ctx->apiImmediateCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, NULL, 0, NULL, 1, &resourceBarrier);
+
+    // Copy data from staging buffer to image resource
+    VkBufferImageCopy copyRegion = {};
+    copyRegion.bufferOffset = 0;
+    copyRegion.bufferRowLength = 0;
+    copyRegion.bufferImageHeight = 0;
+    copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copyRegion.imageSubresource.mipLevel = 0;
+    copyRegion.imageSubresource.baseArrayLayer = 0;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageOffset = {0,0,0};
+    copyRegion.imageExtent = {(u32)textureWidth, (u32)textureHeight, 1};
+    vkCmdCopyBufferToImage(ctx->apiImmediateCommandBuffer, stagingBuffer.apiObject, apiObject, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+    // Then transition image resource layout from transfer dst to shader ro
+    resourceBarrier = {};
+    resourceBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    resourceBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    resourceBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    resourceBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    resourceBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    resourceBarrier.image = apiObject;
+    resourceBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    resourceBarrier.subresourceRange.baseMipLevel = 0;
+    resourceBarrier.subresourceRange.levelCount = 1;
+    resourceBarrier.subresourceRange.baseArrayLayer = 0;
+    resourceBarrier.subresourceRange.layerCount = 1;
+    resourceBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    resourceBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(ctx->apiImmediateCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, // Hardcoded fragment shader
+            0, 0, NULL, 0, NULL, 1, &resourceBarrier);
+
+    SubmitImmediateCommands(ctx);
+
+    DestroyBuffer(ctx, stagingBuffer);
+    free(textureData);  // Not really needed for my purposes...
+
+    Texture result = {};
+    result.apiObject = apiObject;
+    result.apiAllocation = apiAllocation;
+    result.type = textureType;
+    result.format = textureFormat;
+    result.width = textureWidth;
+    result.height = textureHeight;
+    result.channels = textureChannels;
+    return result;
+}
+
+void DestroyTexture(RenderContext* ctx, Texture texture)
+{
+    ASSERT(ctx);
+    ASSERT(ctx->apiMemoryAllocator != VK_NULL_HANDLE);
+    vmaDestroyImage(ctx->apiMemoryAllocator, texture.apiObject, texture.apiAllocation);
+}
 
 // ===================================================================
 // Graphics pipeline
@@ -1374,6 +1578,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
             sizeof(defaultTriangleVertices), sizeof(defaultTriangleVertices) / (5 * sizeof(f32)), (u8*)defaultTriangleVertices);
     Buffer defaultTriangleIndexBuffer = CreateBuffer(&ctx, BUFFER_TYPE_INDEX,
             sizeof(defaultTriangleIndices), sizeof(defaultTriangleIndices) / sizeof(u32), (u8*)defaultTriangleIndices);
+    Texture checkerTexture = CreateTextureFromFile(&ctx, TEXTURE_PATH"checkers.png");
 
     // Render pipeline setup
     u32 presentRenderPassColorOutputCount = 1;
@@ -1384,7 +1589,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
             RENDER_PASS_STORE_OP_STORE,
             IMAGE_LAYOUT_UNDEFINED,
             IMAGE_LAYOUT_PRESENT_SRC,
-            IMAGE_FORMAT_B8G8R8A8_SRGB,
+            IMAGE_FORMAT_BGRA8_SRGB,
         }
     };
     // Each swap chain image is tied to the first color output of each frame in the present pass.
@@ -1578,6 +1783,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     DestroyFrameResources(&ctx, frameResources, RENDERER_MAX_FRAMES_IN_FLIGHT, &globalResourceData);
     DestroyBuffer(&ctx, defaultTriangleVertexBuffer);
     DestroyBuffer(&ctx, defaultTriangleIndexBuffer);
+    DestroyTexture(&ctx, checkerTexture);
     DestroyGraphicsPipeline(&ctx, &defaultPassPipeline);
     DestroyRenderPass(&ctx, &presentRenderPass);
     DestroySwapChain(&ctx, &swapChain);
