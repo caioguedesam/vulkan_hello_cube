@@ -306,7 +306,8 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
         VkPhysicalDeviceFeatures features;
         vkGetPhysicalDeviceProperties(physicalDevice, &properties);
         vkGetPhysicalDeviceFeatures(physicalDevice, &features);
-        if(properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) continue; // Add more if needed
+        if(properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+                && features.samplerAnisotropy) continue; // Add more if needed
 
         // Found a device matching all requirements
         selectedDevice = deviceIndex;
@@ -349,6 +350,7 @@ RenderContext CreateRenderContext(const char* appName, const char* engineName, H
     queueInfo.pQueuePriorities = &deviceQueuePriority;
     
     VkPhysicalDeviceFeatures deviceFeatures = {};
+    deviceFeatures.samplerAnisotropy = VK_TRUE;
 
     VkDeviceCreateInfo deviceInfo = {};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -906,13 +908,13 @@ void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRende
 // ===================================================================
 // Graphics resources
 
-// Position (v3f), Vertex color (v3f)
+// Position (v3f), Vertex color (v3f), Texture coordinates (v2f)
 f32 defaultTriangleVertices[] =
 {
-    -0.5f, -0.5f, 0.f, 1, 0, 0,
-     0.5f, -0.5f, 0.f, 0, 1, 0,
-     0.5f,  0.5f, 0.f, 1, 1, 1,
-    -0.5f,  0.5f, 0.f, 0, 0, 1,
+    -0.5f, -0.5f, 0.f, 1, 0, 0, 0.f, 1.f,
+     0.5f, -0.5f, 0.f, 0, 1, 0, 1.f, 1.f,
+     0.5f,  0.5f, 0.f, 1, 1, 1, 1.f, 0.f,
+    -0.5f,  0.5f, 0.f, 0, 0, 1, 0.f, 0.f,
 };
 
 u32 defaultTriangleIndices[] =
@@ -1008,6 +1010,8 @@ struct Texture
 {
     VkImage apiObject = VK_NULL_HANDLE;
     VmaAllocation apiAllocation;
+    VkImageView apiImageView = VK_NULL_HANDLE;  // This is just here for convenience, and should be moved in the future.
+    VkSampler apiSampler = VK_NULL_HANDLE;      // This is just here for convenience, and should be moved in the future.
     TextureType type = TEXTURE_TYPE_2D;
     ImageFormat format = IMAGE_FORMAT_RGBA8_SRGB;
     u32 width = 0;
@@ -1112,9 +1116,50 @@ Texture CreateTextureFromFile(RenderContext* ctx, const char* assetPath)
     DestroyBuffer(ctx, stagingBuffer);
     free(textureData);  // Not really needed for my purposes...
 
+    // Creating image view
+    VkImageViewCreateInfo imageViewInfo = {};
+    imageViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    imageViewInfo.image = apiObject;
+    imageViewInfo.viewType = textureTypeToVkView[textureType];
+    imageViewInfo.format = imageFormatToVk[textureFormat];
+    imageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    imageViewInfo.subresourceRange.baseMipLevel = 0;
+    imageViewInfo.subresourceRange.levelCount = 1;
+    imageViewInfo.subresourceRange.baseArrayLayer = 0;
+    imageViewInfo.subresourceRange.layerCount = 1;
+    VkImageView apiImageView;
+    ret = vkCreateImageView(ctx->apiDevice, &imageViewInfo, NULL, &apiImageView);
+    VK_ASSERT(ret);
+
+    // Creating sampler for the image (hardcoded params)
+    VkSamplerCreateInfo samplerInfo = {};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.anisotropyEnable = VK_TRUE;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(ctx->apiPhysicalDevice, &properties);
+    samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.mipLodBias = 0.f;
+    samplerInfo.minLod = 0.f;
+    samplerInfo.maxLod = 0.f;
+    VkSampler apiSampler;
+    ret = vkCreateSampler(ctx->apiDevice, &samplerInfo, NULL, &apiSampler);
+    VK_ASSERT(ret);
+
     Texture result = {};
     result.apiObject = apiObject;
     result.apiAllocation = apiAllocation;
+    result.apiImageView = apiImageView;
+    result.apiSampler = apiSampler;
     result.type = textureType;
     result.format = textureFormat;
     result.width = textureWidth;
@@ -1127,6 +1172,8 @@ void DestroyTexture(RenderContext* ctx, Texture texture)
 {
     ASSERT(ctx);
     ASSERT(ctx->apiMemoryAllocator != VK_NULL_HANDLE);
+    vkDestroyImageView(ctx->apiDevice, texture.apiImageView, NULL);
+    vkDestroySampler(ctx->apiDevice, texture.apiSampler, NULL);
     vmaDestroyImage(ctx->apiMemoryAllocator, texture.apiObject, texture.apiAllocation);
 }
 
@@ -1460,39 +1507,49 @@ struct FrameResources
     VkDescriptorSet apiFrameDescriptorSet = VK_NULL_HANDLE;
 };
 
-struct GlobalResourceData
+struct ShaderResourceData
 {
     // TODO(caio): Move these out of here when abstracting shader resources
-    VkDescriptorSetLayout apiFrameDescriptorSetLayout = VK_NULL_HANDLE;
-    VkDescriptorPool apiFrameDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSetLayout apiShaderDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool apiShaderDescriptorPool = VK_NULL_HANDLE;
 };
 
-void InitFrameResources(RenderContext* ctx, FrameResources* frameResources, u32 frameCount, GlobalResourceData* globalResourceData)
+void InitShaderResources(RenderContext* ctx, FrameResources* frameResources, u32 frameCount, ShaderResourceData* shaderResourceData, Texture checkerTexture)
 {
-    // Defining descriptor set layout
+    // Defining descriptor set layouts
     VkDescriptorSetLayoutBinding frameDataBinding = {};
     frameDataBinding.binding = 0;
     frameDataBinding.descriptorCount = 1;
     frameDataBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     frameDataBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkDescriptorSetLayoutBinding checkerTextureBinding = {};
+    checkerTextureBinding.binding = 1;
+    checkerTextureBinding.descriptorCount = 1;
+    checkerTextureBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    checkerTextureBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutBinding bindings[] = {frameDataBinding, checkerTextureBinding};
+
     VkDescriptorSetLayoutCreateInfo descriptorSetLayoutInfo = {};
     descriptorSetLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    descriptorSetLayoutInfo.bindingCount = 1;
-    descriptorSetLayoutInfo.pBindings = &frameDataBinding;
-    VkResult ret = vkCreateDescriptorSetLayout(ctx->apiDevice, &descriptorSetLayoutInfo, NULL, &globalResourceData->apiFrameDescriptorSetLayout);
+    descriptorSetLayoutInfo.bindingCount = ARR_LEN(bindings);
+    descriptorSetLayoutInfo.pBindings = bindings;
+    VkResult ret = vkCreateDescriptorSetLayout(ctx->apiDevice, &descriptorSetLayoutInfo, NULL, &shaderResourceData->apiShaderDescriptorSetLayout);
     VK_ASSERT(ret);
 
     // Allocating descriptor set
-    VkDescriptorPoolSize descriptorPoolSize =
+    VkDescriptorPoolSize descriptorPoolSizes[] =
     {
-        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 10},
+        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10},
     };
     VkDescriptorPoolCreateInfo descriptorPoolInfo = {};
     descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    descriptorPoolInfo.poolSizeCount = 1;
-    descriptorPoolInfo.pPoolSizes = &descriptorPoolSize;
+    descriptorPoolInfo.poolSizeCount = ARR_LEN(descriptorPoolSizes);
+    descriptorPoolInfo.pPoolSizes = descriptorPoolSizes;
     descriptorPoolInfo.maxSets = 10;
-    ret = vkCreateDescriptorPool(ctx->apiDevice, &descriptorPoolInfo, NULL, &globalResourceData->apiFrameDescriptorPool);
+    ret = vkCreateDescriptorPool(ctx->apiDevice, &descriptorPoolInfo, NULL, &shaderResourceData->apiShaderDescriptorPool);
     VK_ASSERT(ret);
 
     // Allocating resources and descriptor sets
@@ -1504,36 +1561,51 @@ void InitFrameResources(RenderContext* ctx, FrameResources* frameResources, u32 
         // Then descriptor set to point to said buffer
         VkDescriptorSetAllocateInfo descriptorSetAllocInfo = {};
         descriptorSetAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        descriptorSetAllocInfo.descriptorPool = globalResourceData->apiFrameDescriptorPool;
+        descriptorSetAllocInfo.descriptorPool = shaderResourceData->apiShaderDescriptorPool;
         descriptorSetAllocInfo.descriptorSetCount = 1;
-        descriptorSetAllocInfo.pSetLayouts = &globalResourceData->apiFrameDescriptorSetLayout;
+        descriptorSetAllocInfo.pSetLayouts = &shaderResourceData->apiShaderDescriptorSetLayout;
         ret = vkAllocateDescriptorSets(ctx->apiDevice, &descriptorSetAllocInfo, &frameResources[i].apiFrameDescriptorSet);
         VK_ASSERT(ret);
 
-        // Then bind descriptor set to buffer resource
+        // Then bind descriptor set to buffer and texture resources
         VkDescriptorBufferInfo descriptorBufferInfo = {};
         descriptorBufferInfo.buffer = frameResources[i].ub_FrameData.apiObject;
         descriptorBufferInfo.offset = 0;
         descriptorBufferInfo.range = frameResources[i].ub_FrameData.size;
-        VkWriteDescriptorSet descriptorSetWrite = {};
-        descriptorSetWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorSetWrite.dstBinding = 0;
-        descriptorSetWrite.dstSet = frameResources[i].apiFrameDescriptorSet;
-        descriptorSetWrite.descriptorCount = 1;
-        descriptorSetWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        descriptorSetWrite.pBufferInfo = &descriptorBufferInfo;
-        vkUpdateDescriptorSets(ctx->apiDevice, 1, &descriptorSetWrite, 0, NULL);
+        VkDescriptorImageInfo descriptorImageInfo = {};
+        descriptorImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        descriptorImageInfo.imageView = checkerTexture.apiImageView;
+        descriptorImageInfo.sampler = checkerTexture.apiSampler;
+
+        VkWriteDescriptorSet descriptorSetWrites[2];
+        descriptorSetWrites[0] = {};
+        descriptorSetWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorSetWrites[0].dstBinding = 0;
+        descriptorSetWrites[0].dstSet = frameResources[i].apiFrameDescriptorSet;
+        descriptorSetWrites[0].descriptorCount = 1;
+        descriptorSetWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        descriptorSetWrites[0].pBufferInfo = &descriptorBufferInfo;
+
+        descriptorSetWrites[1] = {};
+        descriptorSetWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorSetWrites[1].dstBinding = 1;
+        descriptorSetWrites[1].dstSet = frameResources[i].apiFrameDescriptorSet;
+        descriptorSetWrites[1].descriptorCount = 1;
+        descriptorSetWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorSetWrites[1].pImageInfo = &descriptorImageInfo;
+
+        vkUpdateDescriptorSets(ctx->apiDevice, ARR_LEN(descriptorSetWrites), descriptorSetWrites, 0, NULL);
     }
 }
 
-void DestroyFrameResources(RenderContext* ctx, FrameResources* frameResources, u32 frameCount, GlobalResourceData* globalResourceData)
+void DestroyShaderResources(RenderContext* ctx, FrameResources* frameResources, u32 frameCount, ShaderResourceData* globalResourceData)
 {
     for(i32 i = 0; i < frameCount; i++)
     {
         DestroyBuffer(ctx, frameResources[i].ub_FrameData);
     }
-    vkDestroyDescriptorSetLayout(ctx->apiDevice, globalResourceData->apiFrameDescriptorSetLayout, NULL);
-    vkDestroyDescriptorPool(ctx->apiDevice, globalResourceData->apiFrameDescriptorPool, NULL);
+    vkDestroyDescriptorSetLayout(ctx->apiDevice, globalResourceData->apiShaderDescriptorSetLayout, NULL);
+    vkDestroyDescriptorPool(ctx->apiDevice, globalResourceData->apiShaderDescriptorPool, NULL);
 }
 
 // ======================================================================
@@ -1572,13 +1644,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
 
     // Resource creation
     FrameResources frameResources[RENDERER_MAX_FRAMES_IN_FLIGHT];
-    GlobalResourceData globalResourceData = {};
-    InitFrameResources(&ctx, frameResources, RENDERER_MAX_FRAMES_IN_FLIGHT, &globalResourceData);
+    ShaderResourceData globalResourceData = {};
     Buffer defaultTriangleVertexBuffer = CreateBuffer(&ctx, BUFFER_TYPE_VERTEX,
             sizeof(defaultTriangleVertices), sizeof(defaultTriangleVertices) / (5 * sizeof(f32)), (u8*)defaultTriangleVertices);
     Buffer defaultTriangleIndexBuffer = CreateBuffer(&ctx, BUFFER_TYPE_INDEX,
             sizeof(defaultTriangleIndices), sizeof(defaultTriangleIndices) / sizeof(u32), (u8*)defaultTriangleIndices);
     Texture checkerTexture = CreateTextureFromFile(&ctx, TEXTURE_PATH"checkers.png");
+    InitShaderResources(&ctx, frameResources, RENDERER_MAX_FRAMES_IN_FLIGHT, &globalResourceData, checkerTexture);
 
     // Render pipeline setup
     u32 presentRenderPassColorOutputCount = 1;
@@ -1611,8 +1683,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     InputAssemblyState defaultPassInputAssemblyState = {};
     defaultPassInputAssemblyState.primitive = PRIMITIVE_TRIANGLE_LIST;
 
-    VertexFormat defaultPassVertexAttributeFormats[] = { VERTEX_FORMAT_R32G32B32_FLOAT, VERTEX_FORMAT_R32G32B32_FLOAT };
-    VertexLayout defaultPassVertexLayout = CreateVertexLayout(0, 2, defaultPassVertexAttributeFormats);
+    VertexFormat defaultPassVertexAttributeFormats[] = { VERTEX_FORMAT_R32G32B32_FLOAT, VERTEX_FORMAT_R32G32B32_FLOAT, VERTEX_FORMAT_R32G32_FLOAT };
+    VertexLayout defaultPassVertexLayout = CreateVertexLayout(0, ARR_LEN(defaultPassVertexAttributeFormats), defaultPassVertexAttributeFormats);
 
     RasterizerState defaultPassRasterizerState = {};
     defaultPassRasterizerState.fillMode = FILL_MODE_SOLID;
@@ -1620,7 +1692,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     defaultPassRasterizerState.frontFace = FRONT_FACE_CCW;
     GraphicsPipeline defaultPassPipeline = CreateGraphicsPipeline(&ctx, &presentRenderPass,
             defaultPassInputAssemblyState, shader_TriangleVS, shader_TrianglePS, 
-            defaultPassVertexLayout, globalResourceData.apiFrameDescriptorSetLayout, defaultPassRasterizerState);
+            defaultPassVertexLayout, globalResourceData.apiShaderDescriptorSetLayout, defaultPassRasterizerState);
 
 
     FrameData frameData;
@@ -1780,7 +1852,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     // Render cleanup
 
     vkDeviceWaitIdle(ctx.apiDevice);
-    DestroyFrameResources(&ctx, frameResources, RENDERER_MAX_FRAMES_IN_FLIGHT, &globalResourceData);
+    DestroyShaderResources(&ctx, frameResources, RENDERER_MAX_FRAMES_IN_FLIGHT, &globalResourceData);
     DestroyBuffer(&ctx, defaultTriangleVertexBuffer);
     DestroyBuffer(&ctx, defaultTriangleIndexBuffer);
     DestroyTexture(&ctx, checkerTexture);
