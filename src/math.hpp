@@ -181,3 +181,9 @@ m4f VkPerspectiveProjectionMatrix(f32 fovY, f32 aspect, f32 nearPlane, f32 farPl
 f32 Lerp(const f32& a, const f32& b, const f32& t);
 v2f Lerp(const v2f& a, const v2f& b, const f32& t);
 v3f Lerp(const v3f& a, const v3f& b, const f32& t);
+
+// Random
+u64 RandomU64();
+f32 RandomUniform();
+i32 RandomRange(i32 start, i32 end);
+f32 RandomRange(f32 start, f32 end);

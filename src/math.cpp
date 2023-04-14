@@ -609,3 +609,28 @@ v3f Lerp(const v3f& a, const v3f& b, const f32& t)
         Lerp(a.z, b.z, t),
     };
 }
+u64 RandomU64()
+{
+    // Xorshift*64
+    static u64 x = __rdtsc();   // TODO(caio)#THREAD: This shouldn't be static when doing multithreading!
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    return x * 0x2545F4914F6CDD1DULL;
+}
+
+f32 RandomUniform()
+{
+    return (f32)RandomU64()/(f32)MAX_U64;
+}
+
+i32 RandomRange(i32 start, i32 end)
+{
+    // Random int between start (inclusive) and end (inclusive)
+    return start + RandomUniform() * (end + 1 - start);
+}
+
+f32 RandomRange(f32 start, f32 end)
+{
+    return start + RandomUniform() * (end - start);
+}

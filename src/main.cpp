@@ -922,12 +922,41 @@ f32 defaultTriangleVertices[] =
     -1.f, -1.f, -1.f, 0, 1, 0, 1.f, 1.f,   // BR
     -1.f,  1.f, -1.f, 1, 1, 1, 1.f, 0.f,   // TR
      1.f,  1.f, -1.f, 0, 0, 1, 0.f, 0.f,   // TL
+
+    // Top face
+    -1.f,  1.f,  1.f, 1, 0, 0, 0.f, 1.f,   // BL
+     1.f,  1.f,  1.f, 0, 1, 0, 1.f, 1.f,   // BR
+     1.f,  1.f, -1.f, 1, 1, 1, 1.f, 0.f,   // TR
+    -1.f,  1.f, -1.f, 0, 0, 1, 0.f, 0.f,   // TL
+
+    // Bottom face
+    -1.f, -1.f, -1.f, 1, 0, 0, 0.f, 1.f,   // BL
+     1.f, -1.f, -1.f, 0, 1, 0, 1.f, 1.f,   // BR
+     1.f, -1.f,  1.f, 1, 1, 1, 1.f, 0.f,   // TR
+    -1.f, -1.f,  1.f, 0, 0, 1, 0.f, 0.f,   // TL
+
+    // Left face
+    -1.f, -1.f, -1.f, 1, 0, 0, 0.f, 1.f,   // BL
+    -1.f, -1.f,  1.f, 0, 1, 0, 1.f, 1.f,   // BR
+    -1.f,  1.f,  1.f, 1, 1, 1, 1.f, 0.f,   // TR
+    -1.f,  1.f, -1.f, 0, 0, 1, 0.f, 0.f,   // TL
+
+    // Right face
+     1.f, -1.f,  1.f, 1, 0, 0, 0.f, 1.f,   // BL
+     1.f, -1.f, -1.f, 0, 1, 0, 1.f, 1.f,   // BR
+     1.f,  1.f, -1.f, 1, 1, 1, 1.f, 0.f,   // TR
+     1.f,  1.f,  1.f, 0, 0, 1, 0.f, 0.f,   // TL
+
 };
 
 u32 defaultTriangleIndices[] =
 {
     0, 1, 2, 0, 2, 3,
     4, 5, 6, 4, 6, 7,
+    8, 9, 10, 8, 10, 11,
+    12, 13, 14, 12, 14, 15,
+    16, 17, 18, 16, 18, 19,
+    20, 21, 22, 20, 22, 23,
 };
 
 enum BufferType
@@ -1708,8 +1737,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
 
     RasterizerState defaultPassRasterizerState = {};
     defaultPassRasterizerState.fillMode = FILL_MODE_SOLID;
-    //defaultPassRasterizerState.cullMode = CULL_MODE_BACK;
-    defaultPassRasterizerState.cullMode = CULL_MODE_NONE;
+    defaultPassRasterizerState.cullMode = CULL_MODE_BACK;
+    //defaultPassRasterizerState.cullMode = CULL_MODE_NONE;
     defaultPassRasterizerState.frontFace = FRONT_FACE_CCW;
     GraphicsPipeline defaultPassPipeline = CreateGraphicsPipeline(&ctx, &presentRenderPass,
             defaultPassInputAssemblyState, shader_TriangleVS, shader_TrianglePS, 
@@ -1753,7 +1782,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         // Reset command buffer from previous frame
         vkResetCommandBuffer(commandBuffer, 0);
 
-        v3f cameraPosition = {2,2,2};
+        v3f cameraPosition = {0,0,5};
         v3f cameraTarget = {0,0,0};
         f32 fov = TO_RAD(45.f);
         f32 aspect = (f32)windowWidth / (f32)windowHeight;
@@ -1824,11 +1853,23 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         // Push constants
         PushConstants objData = {};
         objData.model = Identity();
-        float angle = (currentFrame / 2000.f);
-        objData.model = ScaleMatrix({0.5f, 0.5f, 0.5f}) * RotationMatrix(angle, {0, 1, 0}) * objData.model;
+        f32 angle = (currentFrame / 2000.f);
+        static v3f axis1 = Normalize(v3f{
+                RandomRange(-1.f, 1.f),
+                RandomRange(-1.f, 1.f),
+                RandomRange(-1.f, 1.f)});
+        static v3f axis2 = Normalize(v3f{
+                RandomRange(-1.f, 1.f),
+                RandomRange(-1.f, 1.f),
+                RandomRange(-1.f, 1.f)});
+        objData.model = ScaleMatrix({0.5f, 0.5f, 0.5f}) * RotationMatrix(angle, axis1) * objData.model;
         vkCmdPushConstants(commandBuffer, defaultPassPipeline.apiPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &objData);
 
         //vkCmdDraw(commandBuffer, defaultTriangleVertexBuffer.count, 1, 0, 0);
+        vkCmdDrawIndexed(commandBuffer, defaultTriangleIndexBuffer.count, 1, 0, 0, 0);
+
+        objData.model = ScaleMatrix({0.5f, 0.5f, 0.5f}) * RotationMatrix(angle, axis2) * Transpose(TranslationMatrix({1,0,-3})) * Identity();
+        vkCmdPushConstants(commandBuffer, defaultPassPipeline.apiPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &objData);
         vkCmdDrawIndexed(commandBuffer, defaultTriangleIndexBuffer.count, 1, 0, 0, 0);
 
         // End render pass
