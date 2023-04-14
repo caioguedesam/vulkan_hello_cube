@@ -554,6 +554,9 @@ struct SwapChain
     u32         imageCount = 0;
     VkImage     apiImages[SWAP_CHAIN_MAX_IMAGE_COUNT];
     VkImageView apiImageViews[SWAP_CHAIN_MAX_IMAGE_COUNT];
+    VkImage     apiDepthImage = VK_NULL_HANDLE;
+    VkImageView apiDepthImageView = VK_NULL_HANDLE;
+    VmaAllocation apiDepthImageAllocation;
 };
 
 SwapChain CreateSwapChain(RenderContext* ctx)
@@ -652,6 +655,69 @@ SwapChain CreateSwapChain(RenderContext* ctx)
         VK_ASSERT(ret);
     }
 
+    // Creating depth attachment resource
+    VkImageCreateInfo depthTextureInfo = {};
+    depthTextureInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    depthTextureInfo.imageType = VK_IMAGE_TYPE_2D;
+    depthTextureInfo.extent.width = extents.width;
+    depthTextureInfo.extent.height = extents.height;
+    depthTextureInfo.extent.depth = 1;
+    depthTextureInfo.mipLevels = 1;
+    depthTextureInfo.arrayLayers = 1;
+    depthTextureInfo.format = VK_FORMAT_D32_SFLOAT;
+    depthTextureInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    depthTextureInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;    // Hardcoded
+    depthTextureInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    depthTextureInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    depthTextureInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthTextureInfo.flags = 0;
+
+    VmaAllocationCreateInfo allocationInfo = {};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    //allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+
+    VkImage apiDepthImage;
+    VmaAllocation apiDepthImageAllocation;
+    ret = vmaCreateImage(ctx->apiMemoryAllocator, &depthTextureInfo, &allocationInfo, &apiDepthImage, &apiDepthImageAllocation, NULL);
+    VK_ASSERT(ret);
+
+    VkImageViewCreateInfo depthImageViewInfo = {};
+    depthImageViewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    depthImageViewInfo.image = apiDepthImage;
+    depthImageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    depthImageViewInfo.format = VK_FORMAT_D32_SFLOAT;
+    depthImageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    depthImageViewInfo.subresourceRange.baseMipLevel = 0;
+    depthImageViewInfo.subresourceRange.levelCount = 1;
+    depthImageViewInfo.subresourceRange.baseArrayLayer = 0;
+    depthImageViewInfo.subresourceRange.layerCount = 1;
+    VkImageView depthImageView;
+    ret = vkCreateImageView(ctx->apiDevice, &depthImageViewInfo, NULL, &depthImageView);
+    VK_ASSERT(ret);
+
+    // Transition the depth resource to correct layout
+    BeginImmediateCommands(ctx);
+    VkImageMemoryBarrier resourceBarrier = {};
+    resourceBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    resourceBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    resourceBarrier.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    resourceBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    resourceBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    resourceBarrier.image = apiDepthImage;
+    resourceBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    resourceBarrier.subresourceRange.baseMipLevel = 0;
+    resourceBarrier.subresourceRange.levelCount = 1;
+    resourceBarrier.subresourceRange.baseArrayLayer = 0;
+    resourceBarrier.subresourceRange.layerCount = 1;
+    resourceBarrier.srcAccessMask = 0;
+    resourceBarrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    vkCmdPipelineBarrier(ctx->apiImmediateCommandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            0, 0, NULL, 0, NULL, 1, &resourceBarrier);
+    SubmitImmediateCommands(ctx);
+
+    result.apiDepthImage = apiDepthImage;
+    result.apiDepthImageAllocation = apiDepthImageAllocation;
+    result.apiDepthImageView = depthImageView;
     return result;
 }
 
@@ -663,6 +729,8 @@ void DestroySwapChain(RenderContext* ctx, SwapChain* swapChain)
     {
         vkDestroyImageView(ctx->apiDevice, swapChain->apiImageViews[i], NULL);
     }
+    vkDestroyImageView(ctx->apiDevice, swapChain->apiDepthImageView, NULL);
+    vmaDestroyImage(ctx->apiMemoryAllocator, swapChain->apiDepthImage, swapChain->apiDepthImageAllocation);
     vkDestroySwapchainKHR(ctx->apiDevice, swapChain->apiObject, NULL);
 
     *swapChain = {};
@@ -749,8 +817,8 @@ struct RenderPassColorOutputInfo
 // Note: RenderPass is not responsible for image resource ownership, only holds references.
 struct RenderPassFrameOutputs
 {
-    VkImageView apiColorOutputImageViews[RENDER_PASS_MAX_COLOR_OUTPUTS];
-    // TODO(caio): Depth/stencil output image view
+    VkImageView apiOutputImageViews[RENDER_PASS_MAX_COLOR_OUTPUTS]; // Note: this actually contains the depth image view also, at the end.
+    //VkImageView apiDepthImageView = VK_NULL_HANDLE;
 };
 
 struct RenderPass
@@ -772,6 +840,7 @@ RenderPass CreateRenderPass(RenderContext* ctx, u32 frameCount, u32 width, u32 h
         u32 colorOutputCount, RenderPassColorOutputInfo* colorOutputInfo, RenderPassFrameOutputs* frameOutputs)
 {
     VkAttachmentDescription colorAttachments[RENDER_PASS_MAX_COLOR_OUTPUTS] = {0};
+    VkAttachmentDescription depthAttachment = {};
     for(i32 i = 0; i < colorOutputCount; i++)
     {
         colorAttachments[i].format = imageFormatToVk[colorOutputInfo[i].format];
@@ -783,29 +852,55 @@ RenderPass CreateRenderPass(RenderContext* ctx, u32 frameCount, u32 width, u32 h
         colorAttachments[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         colorAttachments[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     }
-
-    // TODO(caio): Add support for depth/stencil attachments
+    depthAttachment.format = VK_FORMAT_D32_SFLOAT;
+    depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkAttachmentReference colorOutputRefs[colorOutputCount];
+    VkAttachmentReference depthOutputRef = {};
     for(i32 i = 0; i < colorOutputCount; i++)
     {
         colorOutputRefs[i].attachment = i;
         colorOutputRefs[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
+    depthOutputRef.attachment = colorOutputCount;   // depth attachment comes after all color attachments
+    depthOutputRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     // Single subpass per render pass
     VkSubpassDescription subpassDesc = {};
     subpassDesc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpassDesc.colorAttachmentCount = colorOutputCount;
     subpassDesc.pColorAttachments = colorOutputRefs;
+    subpassDesc.pDepthStencilAttachment = &depthOutputRef;
+    VkSubpassDependency dependency = {};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
     // Creating render pass
+    VkAttachmentDescription allAttachments[colorOutputCount + 1];
+    for(i32 i = 0; i < colorOutputCount; i++)
+    {
+        allAttachments[i] = colorAttachments[i];
+    }
+    allAttachments[colorOutputCount] = depthAttachment;
+
     VkRenderPassCreateInfo renderPassInfo = {};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpassDesc;
-    renderPassInfo.attachmentCount = colorOutputCount;
-    renderPassInfo.pAttachments = colorAttachments;
+    renderPassInfo.attachmentCount = ARR_LEN(allAttachments);
+    renderPassInfo.pAttachments = allAttachments;
+    renderPassInfo.dependencyCount = 1;
+    renderPassInfo.pDependencies = &dependency;
     VkRenderPass renderPass;
     VkResult ret = vkCreateRenderPass(ctx->apiDevice, &renderPassInfo, NULL, &renderPass);
     VK_ASSERT(ret);
@@ -821,8 +916,8 @@ RenderPass CreateRenderPass(RenderContext* ctx, u32 frameCount, u32 width, u32 h
         VkFramebufferCreateInfo framebufferInfo = {};
         framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         framebufferInfo.renderPass = renderPass;
-        framebufferInfo.attachmentCount = colorOutputCount;
-        framebufferInfo.pAttachments = frameOutputs[i].apiColorOutputImageViews;
+        framebufferInfo.attachmentCount = colorOutputCount + 1;     // +1 for depth attachment
+        framebufferInfo.pAttachments = frameOutputs[i].apiOutputImageViews;
         framebufferInfo.width = width;
         framebufferInfo.height = height;
         framebufferInfo.layers = 1;
@@ -837,12 +932,12 @@ RenderPass CreateRenderPass(RenderContext* ctx, u32 frameCount, u32 width, u32 h
     result.outputWidth = width;
     result.outputHeight = height;
     result.colorOutputCount = colorOutputCount;
-    for(i32 i = 0; i < colorOutputCount; i++)
+    for(i32 i = 0; i < colorOutputCount + 1; i++)   // +1 for depth buffer
     {
         result.colorOutputInfo[i] = colorOutputInfo[i];
         for(i32 j = 0; j < frameCount; j++)
         {
-            result.frameOutputs[j].apiColorOutputImageViews[i] = frameOutputs[j].apiColorOutputImageViews[i];
+            result.frameOutputs[j].apiOutputImageViews[i] = frameOutputs[j].apiOutputImageViews[i];
         }
     }
 
@@ -897,8 +992,9 @@ void OnResize(RenderContext* ctx, SwapChain* swapChain, RenderPass* presentRende
     {
         for(i32 j = 0; j < presentRenderPassColorOutputCount; j++)
         {
-            presentRenderPassFrameOutputs[i].apiColorOutputImageViews[j] = swapChain->apiImageViews[i];
+            presentRenderPassFrameOutputs[i].apiOutputImageViews[j] = swapChain->apiImageViews[i];
         }
+        presentRenderPassFrameOutputs[i].apiOutputImageViews[presentRenderPassColorOutputCount] = swapChain->apiDepthImageView;
     }
     *presentRenderPass = CreateRenderPass(ctx, 
             swapChain->imageCount, swapChain->extents.width, swapChain->extents.height, 1,
@@ -1479,6 +1575,14 @@ GraphicsPipeline CreateGraphicsPipeline(
     colorBlendInfo.attachmentCount = 1;
     colorBlendInfo.pAttachments = &colorBlendAttachment;
 
+    VkPipelineDepthStencilStateCreateInfo depthStateInfo = {};
+    depthStateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStateInfo.depthTestEnable = VK_TRUE;
+    depthStateInfo.depthWriteEnable = VK_TRUE;
+    depthStateInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+    depthStateInfo.depthBoundsTestEnable = VK_FALSE;
+    depthStateInfo.stencilTestEnable = VK_FALSE;
+
     // Push constants (hardcoded)
     VkPushConstantRange pushConstantRange = {};
     pushConstantRange.offset = 0;
@@ -1509,7 +1613,7 @@ GraphicsPipeline CreateGraphicsPipeline(
     apiObjectInfo.pDynamicState = &dynamicStateInfo;
     apiObjectInfo.pRasterizationState = &rasterizationStateInfo;
     apiObjectInfo.pColorBlendState = &colorBlendInfo;
-    apiObjectInfo.pDepthStencilState = NULL;
+    apiObjectInfo.pDepthStencilState = &depthStateInfo;
     apiObjectInfo.layout = pipelineLayout;
     apiObjectInfo.renderPass = renderPass->apiObject;
     apiObjectInfo.subpass = 0;      // Hardcoded to use only one subpass
@@ -1720,8 +1824,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
     {
         for(i32 j = 0; j < presentRenderPassColorOutputCount; j++)
         {
-            presentRenderPassFrameOutputs[i].apiColorOutputImageViews[j] = swapChain.apiImageViews[i];
+            presentRenderPassFrameOutputs[i].apiOutputImageViews[j] = swapChain.apiImageViews[i];
         }
+        //presentRenderPassFrameOutputs->apiDepthImageView = swapChain.apiDepthImageView;
+        presentRenderPassFrameOutputs[i].apiOutputImageViews[presentRenderPassColorOutputCount] = swapChain.apiDepthImageView;
     }
     RenderPass presentRenderPass = CreateRenderPass(&ctx, 
             swapChain.imageCount, swapChain.extents.width, swapChain.extents.height, 1,
@@ -1816,11 +1922,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrev, PWSTR pCmdLine, int nC
         renderPassBeginInfo.renderArea.offset.y = 0;
         //renderPassBeginInfo.renderArea.extent = swapChainSupportDetails.extent;
         renderPassBeginInfo.renderArea.extent = {presentRenderPass.outputWidth, presentRenderPass.outputHeight};
-        VkClearValue clearValue;
+        VkClearValue clearValues[2] = {0};
         float flash = fabsf(sinf(currentFrame / 2000.f)) * 0.05f;
-        clearValue.color = {{flash, flash, flash, 1.0f}};
-        renderPassBeginInfo.clearValueCount = 1;
-        renderPassBeginInfo.pClearValues = &clearValue;
+        clearValues[0].color = {{flash, flash, flash, 1.0f}};
+        clearValues[1].depthStencil = {1.f, 0};
+        renderPassBeginInfo.clearValueCount = ARR_LEN(clearValues);
+        renderPassBeginInfo.pClearValues = clearValues;
         vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
         // Draw commands
